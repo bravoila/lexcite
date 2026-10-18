@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "workflow",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/candidate.json",
+    "sha256": "f5d90164537c8159e0c252ff1102ba95f5632936bd16a0307beb4e52e2856650",
+    "bytes": 7963
+  },
+  "artifact": {
+    "path": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/lexcite-agent.html",
+    "sha256": "bad8630fc406a634724722dd10a7d7d50cdc9192dba46d65e4aa5a9303daf83c",
+    "bytes": 829796
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/lexcite-agent.finalize.json",
+    "summaryReceipt": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/lexcite-agent.finalize-summary.json",
+    "browserCheckReceipt": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/lexcite-agent.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-18T01:24:14.200Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2250
+}

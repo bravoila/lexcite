@@ -40,3 +40,18 @@ def test_full_http_model_roundtrip(client,corpus):
         assert result["citations"][0]["number"]=="第五百七十九条"
     finally:
         server.shutdown();server.server_close();thread.join(timeout=2)
+
+
+def test_endpoint_change_drops_stored_key(client):
+    from app import db
+    llm.save_settings({"profile":"api","provider":"custom","base_url":"https://first.example/v1","model":"m","api_key":"sk-old-secret"})
+    assert llm.resolved()["api_key"]=="sk-old-secret"
+    llm.save_settings({"profile":"api","provider":"custom","base_url":"https://second.example/v1","model":"m"})
+    assert llm.resolved()["api_key"]==""
+    assert "sk-old-secret" not in json.dumps(db.get("settings"))
+
+
+def test_unchanged_endpoint_keeps_stored_key(client):
+    llm.save_settings({"profile":"api","provider":"custom","base_url":"https://first.example/v1","model":"m","api_key":"sk-old-secret"})
+    llm.save_settings({"profile":"api","provider":"custom","base_url":"https://first.example/v1","model":"m2"})
+    assert llm.resolved()["api_key"]=="sk-old-secret"

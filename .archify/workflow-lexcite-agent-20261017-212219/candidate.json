@@ -1,0 +1,185 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "LexCite 当前 Research Agent 工作流",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": ".archify/workflow-lexcite-agent-20261017-212219/lexcite-agent.html",
+    "repository": {
+      "url": "https://github.com/bravoila/lexcite.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "acb2c239cb70f432777937c86db39654c0f2cfc1"
+    }
+  },
+  "lanes": [
+    { "id": "request", "label": "请求入口与案件上下文" },
+    { "id": "agent", "label": "单一 Research Agent" },
+    { "id": "evidence", "label": "检索与法源工具" },
+    { "id": "checks", "label": "结论校验" },
+    { "id": "branches", "label": "按需补查 / 失败修正", "variant": "exception" },
+    { "id": "delivery", "label": "结果与持久化" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "接收问题与构建事实", "fromCol": 0, "toCol": 1 },
+    { "id": "retrieve", "label": "检索证据", "fromCol": 2, "toCol": 2, "variant": "dashed" },
+    { "id": "reason", "label": "生成与验证", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "return", "label": "返回已核对结果", "fromCol": 5, "toCol": 5 }
+  ],
+  "mainPath": [
+    "request_in",
+    "case_context",
+    "retrieval",
+    "draft",
+    "validation",
+    "result"
+  ],
+  "nodes": [
+    {
+      "id": "request_in",
+      "lane": "request",
+      "col": 0,
+      "type": "external",
+      "label": "用户问题",
+      "sublabel": "ask 同步 / research 后台任务",
+      "width": 148,
+      "sources": [
+        { "path": "app/main.py", "line": 210, "end_line": 231, "label": "研究 API" }
+      ]
+    },
+    {
+      "id": "case_context",
+      "lane": "agent",
+      "col": 1,
+      "type": "backend",
+      "label": "案件上下文",
+      "sublabel": "用户原话 + 已确认事实；整理未知与冲突",
+      "width": 190,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 40, "end_line": 58, "label": "研究输入" },
+        { "path": "app/research_agent/context.py", "line": 81, "end_line": 95, "label": "来源事实" },
+        { "path": "app/research_agent/context.py", "line": 118, "end_line": 145, "label": "事实快照约束" }
+      ]
+    },
+    {
+      "id": "retrieval",
+      "lane": "evidence",
+      "col": 2,
+      "type": "backend",
+      "label": "法条检索",
+      "sublabel": "日期 / 地区 / 复核状态过滤；BM25、条号、可选向量与重排",
+      "width": 214,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 196, "end_line": 206, "label": "运行时检索" },
+        { "path": "app/research_agent/retrieval.py", "line": 84, "end_line": 108, "label": "法源资格筛选" },
+        { "path": "app/research_agent/retrieval.py", "line": 135, "end_line": 154, "label": "混合召回记录" }
+      ]
+    },
+    {
+      "id": "draft",
+      "lane": "agent",
+      "col": 3,
+      "type": "backend",
+      "label": "LLM 法律分析",
+      "sublabel": "按 Draft 结构输出结论、证据 ID、引文与缺口",
+      "width": 196,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 278, "end_line": 303, "label": "分析与补查" },
+        { "path": "app/research_agent/schemas.py", "line": 60, "end_line": 72, "label": "结构化输出" },
+        { "path": "app/research_agent/runner.py", "line": 69, "end_line": 110, "label": "受控模型调用" }
+      ]
+    },
+    {
+      "id": "validation",
+      "lane": "checks",
+      "col": 4,
+      "type": "security",
+      "label": "逐项证据校验",
+      "sublabel": "先确定性核引文 / ID，再由 LLM 复核支持关系",
+      "width": 214,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 304, "end_line": 328, "label": "校验与复核顺序" },
+        { "path": "app/research_agent/verification.py", "line": 6, "end_line": 31, "label": "确定性引用检查" }
+      ]
+    },
+    {
+      "id": "result",
+      "lane": "delivery",
+      "col": 5,
+      "type": "database",
+      "label": "结果 / 研究记录",
+      "sublabel": "仅返回通过检查的结论；可保存 partial 或 evidence_only",
+      "width": 206,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 146, "end_line": 177, "label": "结果状态" },
+        { "path": "app/jobs.py", "line": 117, "end_line": 131, "label": "后台结果提交" },
+        { "path": "app/main.py", "line": 229, "end_line": 246, "label": "任务状态 API" }
+      ]
+    },
+    {
+      "id": "official_source",
+      "lane": "branches",
+      "col": 3,
+      "type": "cloud",
+      "label": "官方法源补查",
+      "sublabel": "仅开启联网且有缺口时；完整原文核对后临时纳入",
+      "width": 214,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 208, "end_line": 222, "label": "补查条件" },
+        { "path": "app/research_agent/authorities.py", "line": 138, "end_line": 154, "label": "读取预算" },
+        { "path": "app/research_agent/authorities.py", "line": 216, "end_line": 229, "label": "原文校验与临时证据" }
+      ]
+    },
+    {
+      "id": "repair",
+      "lane": "branches",
+      "col": 1,
+      "type": "backend",
+      "label": "有限修正计划",
+      "sublabel": "只有校验 / 支持性失败等情况才修正并重检",
+      "width": 204,
+      "sources": [
+        { "path": "app/research_agent/runner.py", "line": 237, "end_line": 250, "label": "后续轮计划" },
+        { "path": "app/research_agent/runner.py", "line": 335, "end_line": 338, "label": "预算终止" }
+      ]
+    }
+  ],
+  "edges": [
+    { "id": "request-context", "from": "request_in", "to": "case_context", "role": "main", "variant": "emphasis", "label": "问题 + 案件范围" },
+    { "id": "context-retrieval", "from": "case_context", "to": "retrieval", "role": "main", "label": "研究主题 / 事实 / 日期 / 地区" },
+    { "id": "retrieval-draft", "from": "retrieval", "to": "draft", "role": "main", "label": "完整法条证据" },
+    { "id": "draft-validation", "from": "draft", "to": "validation", "role": "main", "label": "结论 + 证据 ID / 原文" },
+    { "id": "validation-result", "from": "validation", "to": "result", "role": "main", "variant": "emphasis", "label": "通过项 / 部分结论" },
+    { "id": "retrieval-official", "from": "retrieval", "to": "official_source", "role": "branch", "variant": "dashed", "label": "法源缺口 + 用户允许联网" },
+    { "id": "official-retrieve", "from": "official_source", "to": "retrieval", "role": "return", "variant": "dashed", "label": "已校验原文加入本轮证据" },
+    { "id": "validation-repair", "from": "validation", "to": "repair", "role": "error", "variant": "security", "label": "检查未通过且仍有预算", "route": "bottom-channel", "fromSide": "bottom", "toSide": "bottom" },
+    { "id": "repair-retrieve", "from": "repair", "to": "retrieval", "role": "return", "variant": "dashed", "label": "修正查询后重检" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "它是什么",
+      "items": [
+        "这是一个 Python Research Agent 编排流程，不是 Router + 多个自主 Specialist。",
+        "同一个 runner 按阶段调用模型；后端执行检索与校验。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "可信边界",
+      "items": [
+        "确定性校验确认引用存在且原文匹配；模型复核再判断支持关系。",
+        "模型复核不等于法律正确性保证；预算耗尽时保留已通过的部分。"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "循环与预算",
+      "items": [
+        "研究最多使用配置的轮数，聊天模型调用总上限为 18 次。",
+        "官方补查最多 2 次自动搜索、4 次网页读取；均为按需路径。"
+      ]
+    }
+  ]
+}

@@ -110,6 +110,27 @@ def test_semantic_failure_triggers_new_retrieval_and_repair(client,corpus,monkey
     assert len(plans)==1 and plans[0]['repair_feedback'][0]['reason']=='缺少适用条件，请条件化'
 
 
+def test_repair_queries_survive_many_authorities(client,corpus,monkeypatch):
+    from app.research_agent import authorities
+    cid=setup(client); searches=[]; plans=[]
+    needs=[{'name':f'测试补充法源{i}','reason':'合成多法源需求','articles':[]} for i in range(8)]
+    monkeypatch.setattr(authorities,'directory_for',lambda topic:needs)
+    original=retrieval.search
+    def search(queries,*args,**kwargs):searches.append(queries);return original(queries,*args,**kwargs)
+    def model(system,payload,schema,verify=False):
+        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
+        if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
+        if schema is Plan:
+            plans.append(1)
+            return Plan(queries=['修正查询甲','修正查询乙','修正查询丙'])
+        if schema is Draft:return good(payload)
+        return Verdict(checks=[{"claim_index":0,"supported":bool(plans),"reason":"首轮不支持，需修正检索"}])
+    monkeypatch.setattr(retrieval,'search',search);monkeypatch.setattr(llm,'request_json',model)
+    r=engine.answer(cid,'未支付价款怎么办')
+    assert r['status'] in ('answered','partial') and len(searches)==2 and searches[0]!=searches[1]
+    assert sum(1 for q in searches[1] if '修正查询' in q)>=2
+
+
 def test_exhausted_agent_never_publishes_invalid_claim(client,corpus,monkeypatch):
     cid=setup(client)
     def model(system,payload,schema,verify=False):

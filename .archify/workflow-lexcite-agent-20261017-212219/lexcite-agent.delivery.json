@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "89ffcc41-64fe-46d8-b9c3-3d4a94ce3ca6",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/candidate.json",
+  "output": "/Users/bravoila/Documents/Agents/lexcite/.archify/workflow-lexcite-agent-20261017-212219/lexcite-agent.html",
+  "specification": {
+    "sha256": "f5d90164537c8159e0c252ff1102ba95f5632936bd16a0307beb4e52e2856650",
+    "bytes": 7963
+  },
+  "artifact": {
+    "sha256": "bad8630fc406a634724722dd10a7d7d50cdc9192dba46d65e4aa5a9303daf83c",
+    "bytes": 829796
+  }
+}

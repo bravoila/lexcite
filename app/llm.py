@@ -135,10 +135,15 @@ def save_settings(value):
     from cryptography.fernet import Fernet
     old = db.get("settings", {})
     key = value.pop("api_key", None)
+    # The stored key is bound to its endpoint; changing profile/provider/base_url
+    # without supplying a new key clears it instead of leaking it to a new host.
+    same = all(value.get(k) == old.get(k) for k in ("profile", "provider", "base_url"))
     if key is not None:
         value["api_key_encrypted"] = cipher().encrypt(key.encode()).decode() if key else ""
-    elif "api_key_encrypted" in old:
+    elif same and "api_key_encrypted" in old:
         value["api_key_encrypted"] = old["api_key_encrypted"]
+    else:
+        value["api_key_encrypted"] = ""
     db.put("settings", value)
 
 

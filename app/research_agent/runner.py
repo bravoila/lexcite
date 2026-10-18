@@ -234,6 +234,8 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         needs=authorities.directory_for(state['research_focus']) if use_model else []
         needs=[n for n in needs if not authorities.entry_for(n['name']) or authorities.entry_for(n['name'])['effective_from']<=case['event_date']]
         feedback,previous,last_ids,manual_web=[],None,None,False
+        with db.connect() as c:
+            library_names=[n for r in c.execute("SELECT name,canonical_name FROM laws") for n in r if n]
         for number in range(1,(s['agent_rounds'] if use_model else 1)+1):
             check();result['rounds']=number;focus=state['research_focus'];plan=None
             fact_query=focus+'\n'+'；'.join(x['text'] for x in state['facts'])[:900] if state['facts'] else focus
@@ -243,7 +245,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
                 try:
                     plan=call(PLAN,context|{'repair_feedback':feedback,'source_gaps':result['source_gaps'],'authority_directory':needs,'previous_observation':{'candidate_ids':last_ids,'coverage':result['coverage']}},Plan)
                     needs=unique_needs(needs+plan.authorities)
-                    queries=list(dict.fromkeys([focus,fact_query]+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]+[q[:400] for q in plan.queries if q.strip()]))[:9]
+                    queries=list(dict.fromkeys([focus,fact_query]+[q[:400] for q in plan.queries if q.strip()]+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]))[:9]
                     result['missing_facts']=questions(plan.questions)
                     emit('plan','检索计划就绪','；'.join(queries)[:900],'completed')
                 except llm.ModelError as exc:
@@ -304,7 +306,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             valid,feedback=[],[]
             emit('citations','校验引用原文','逐项核对法规ID、完整条文中的连续引文、法规名称和条号。')
             for i,claim in enumerate(draft.claims):
-                ok,reason=validate_claim(claim,evidence)
+                ok,reason=validate_claim(claim,evidence,library_names)
                 if ok:valid.append(claim)
                 else:feedback.append({'claim_index':i,'type':'invalid_citation','reason':reason})
             emit('citations','引用校验完成',f'通过 {len(valid)} 项；需修正 {len(feedback)} 项。','completed' if not feedback else 'warning')

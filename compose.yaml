@@ -8,6 +8,11 @@ services:
       LEXCITE_ADMIN_PASSWORD: ${LEXCITE_ADMIN_PASSWORD:-}
       LEXCITE_SECURE_COOKIE: ${LEXCITE_SECURE_COOKIE:-0}
       LEXCITE_PUBLIC_URL: ${LEXCITE_PUBLIC_URL:-}
+      # Set to 1 only when a reverse proxy sits in front and it appends/overwrites
+      # X-Forwarded-For with the real client IP (nginx: proxy_set_header
+      # X-Forwarded-For $proxy_add_x_forwarded_for). Otherwise leave empty so
+      # spoofed XFF headers cannot bypass the login rate limit.
+      LEXCITE_TRUST_PROXY: ${LEXCITE_TRUST_PROXY:-}
       MODEL_PROFILE: ${MODEL_PROFILE:-local}
       MODEL_LOCAL_PROVIDER: ${MODEL_LOCAL_PROVIDER:-}
       MODEL_LOCAL_BASE_URL: ${MODEL_LOCAL_BASE_URL:-}

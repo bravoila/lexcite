@@ -158,8 +158,18 @@ def rank(queries, rows, limit=None, dense=False):
     df=Counter(t for d in docs for t in d);fused=defaultdict(float);exact_ids=set();lex_ids=set();dense_ids=set()
     unique_laws={r['law_id'] for r in rows}
     for query in queries:
-        qnumbers={article_key(x) for x in re.findall(r'第'+NUM+r'条(?:之[一二三四五六七八九十]+)?',normalize(query))}
-        targets=query_laws(query,rows);qt=set(tokens(query));scores=[]
+        qnumbers={article_key(x) for x in re.findall(r'第'+NUM+r'条(?:之'+NUM+r')?',normalize(query))}
+        targets=query_laws(query,rows)
+        # A query that names another law (even one absent from the library) must
+        # never feed subject-less article numbers into the exact lane.
+        foreign=[n for n in re.findall(r'《([^》]{2,220})》',query) if not any(matches_law(r,n) for r in rows)]
+        for name in re.findall(r'([一-鿿]{1,24}(?:法|条例|规定|办法|解释|规则|细则|决定|决议|公约|条约|通则|法典|典|规范|准则|协定))第'+NUM+r'条',normalize(query)):
+            if name in ('本法','该法','此法','有关规定','法律规定','相关法律','有关法律','本规定','该规定','本办法','该办法','本条例','该条例','本解释','该解释','本规则','该规则','本细则','该细则'):continue
+            if name not in foreign and not any(matches_law(r,name) for r in rows):foreign.append(name)
+        if foreign:
+            warnings.append('查询点名了未入库法规：'+'、'.join('《'+n+'》' for n in foreign)+'；已禁止无主体条号匹配，请补录或核对法规名称。')
+        subject_bound=bool(targets) or (len(unique_laws)==1 and not foreign)
+        qt=set(tokens(query));scores=[]
         for i,doc in enumerate(docs):
             if targets and not any(matches_law(rows[i],name) for name in targets):continue
             score=0.;matched=0
@@ -169,7 +179,7 @@ def rank(queries, rows, limit=None, dense=False):
                 matched+=1
                 idf=math.log(1+(len(rows)-df[t]+.5)/(df[t]+.5))
                 score+=idf*f*2.5/(f+1.5*(.25+.75*lengths[i]/max(avg,1)))
-            exact=article_key(rows[i]['number']) in qnumbers and (bool(targets) or len(unique_laws)==1)
+            exact=article_key(rows[i]['number']) in qnumbers and subject_bound
             if exact:exact_ids.add(i)
             if (matched>0 and score>0) or exact:scores.append((i,score+(100 if exact else 0)))
         for position,(i,_) in enumerate(sorted(scores,key=lambda x:-x[1])[:s['recall_k']]):
@@ -233,9 +243,9 @@ def rank(queries, rows, limit=None, dense=False):
         **({'rerank_score':scores[i]} if i in scores else {})} for i in indices]
     ids={r['id'] for r in selected};max_expanded=len(selected)+3
     for row in list(selected[:4]):
-        refs=re.findall(r'(?:本法|本解释|本规定|本条例|本办法)\s*(第'+NUM+r'条(?:之[一二三四五六七八九十]+)?)',row['body'])
+        refs={article_key(x) for x in re.findall(r'(?:本法|本解释|本规定|本条例|本办法)\s*(第'+NUM+r'条(?:之'+NUM+r')?)',row['body'])}
         for candidate in rows:
-            if candidate['law_id']==row['law_id'] and candidate['number'] in refs and candidate['id'] not in ids:
+            if candidate['law_id']==row['law_id'] and article_key(candidate['number']) in refs and candidate['id'] not in ids:
                 selected.append(candidate|{'retrieval_score':0,'expanded':True});ids.add(candidate['id'])
                 if len(selected)>=max_expanded:return finish(selected)
     return finish(selected)

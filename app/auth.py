@@ -10,6 +10,8 @@ from . import db
 
 LOCK = threading.Lock()
 ATTEMPTS = defaultdict(list)
+GLOBAL_FAILS = []
+LOCAL_ADDRESSES = {"127.0.0.1", "::1"}
 
 
 def password_hash(password, salt=None):
@@ -47,13 +49,29 @@ def setup(password, code):
 
 def login(password, address):
     now = time.time()
+    local = address in LOCAL_ADDRESSES
     with LOCK:
         ATTEMPTS[address] = [x for x in ATTEMPTS[address] if now-x < 600]
-        if len(ATTEMPTS[address]) >= 10:
-            raise HTTPException(429, "登录尝试过多，请10分钟后重试")
-        ATTEMPTS[address].append(now)
+        limited = not local and len(ATTEMPTS[address]) >= 10
+        if not local:
+            GLOBAL_FAILS[:] = [x for x in GLOBAL_FAILS if now-x < 600]
+            throttled = len(GLOBAL_FAILS) >= 60
+        else:
+            throttled = False
+    if limited:
+        # Per-address (account) limit: only the flooded address is blocked;
+        # behind a reverse proxy the addresses come from X-Forwarded-For.
+        raise HTTPException(429, "登录尝试过多，请10分钟后重试")
+    if throttled:
+        # Global anonymous cap slows bulk guessing but never locks anyone out;
+        # the correct password still works, just delayed.
+        time.sleep(2)
     stored = db.get("password")
     if not stored or not hmac.compare_digest(password_hash(password, stored["salt"])["digest"], stored["digest"]):
+        with LOCK:
+            ATTEMPTS[address].append(now)
+            if not local:
+                GLOBAL_FAILS.append(now)
         raise HTTPException(401, "密码不正确")
     with LOCK:
         ATTEMPTS.pop(address, None)

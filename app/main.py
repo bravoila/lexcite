@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -117,9 +118,22 @@ def setup(value: LoginInput):
     return {"ok": True}
 
 
+def client_address(request):
+    # Only honor X-Forwarded-For when the deployment opts in (LEXCITE_TRUST_PROXY=1,
+    # i.e. a known reverse proxy sits in front). Use the last hop, the address the
+    # trusted proxy actually saw; earlier entries are client-supplied and spoofable.
+    if os.getenv("LEXCITE_TRUST_PROXY") == "1":
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            last = forwarded.split(",")[-1].strip()
+            if re.fullmatch(r"[0-9a-fA-F:.\[\]]+", last):
+                return last
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/api/login")
 def login(value: LoginInput, request: Request):
-    token = auth.login(value.password, request.client.host if request.client else "unknown")
+    token = auth.login(value.password, client_address(request))
     response = JSONResponse({"ok": True})
     response.set_cookie("lexcite_session", token, httponly=True, samesite="strict", secure=os.getenv("LEXCITE_SECURE_COOKIE") == "1", max_age=28800)
     return response
