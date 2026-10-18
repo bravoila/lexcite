@@ -120,6 +120,24 @@ def test_json_compatibility_and_reasoning_sse(client,monkeypatch,provider,thinki
     assert '接口测试' not in value.model_dump_json()
 
 
+def test_request_options_are_scoped_and_usage_is_provider_reported(client,monkeypatch):
+    llm.save_settings({'provider':'dashscope','base_url':'http://localhost:9999/v1','model':'fixture','thinking_mode':'enabled','max_tokens':4000})
+    bodies=[];usage=[]
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':'{"queries":["测试"]}'}}],'usage':{'prompt_tokens':120,'completion_tokens':30,'total_tokens':150}})
+    wire(monkeypatch,handler)
+    with llm.capture_usage(usage.append):
+        with llm.request_options(thinking_mode='disabled',max_tokens=1200):
+            llm.request_json('test',{},Plan)
+        llm.request_json('test',{},Plan)
+    assert bodies[0]['enable_thinking'] is False and bodies[0]['max_tokens']==1200
+    assert bodies[1]['enable_thinking'] is True and bodies[1]['max_tokens']==4000
+    assert bodies[1]['stream_options']=={'include_usage':True}
+    assert usage==[{'prompt_tokens':120,'completion_tokens':30,'total_tokens':150}]*2
+    assert llm.settings()['thinking_mode']=='enabled' and llm.settings()['max_tokens']==4000
+
+
 def test_json_fallback_local_think_and_empty_reporting(client,monkeypatch):
     create(client);fragments=[]
     wire(monkeypatch,lambda req:httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':'<think>本地测试片段</think>{"queries":["<think>只是数据</think>"]}'}}]}))

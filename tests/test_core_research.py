@@ -117,48 +117,42 @@ def test_wrong_metadata_or_truncated_law_not_accepted(client,text):
 
 def test_offline_gap_not_fact_question_and_unrelated_candidates_not_citations(client,corpus,monkeypatch):
     cid=create(client);calls=[]
+    original_search=retrieval.search
+    monkeypatch.setattr(retrieval,'search',lambda queries,*args,**kwargs:original_search(['未支付价款'],*args,**kwargs))
     def model(system,payload,schema,verify=False):
         calls.append(schema)
         if schema is Plan:return Plan(queries=['未支付价款'],authorities=[{'name':NAME,'articles':['第五条'],'reason':'需要专项依据'}])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[],coverage='missing',missing_authorities=[{'name':NAME,'articles':['第五条'],'reason':'候选无法支持彩礼争点'}],reason='候选仅为合同条文')
-        raise AssertionError('不应进入法律草稿')
+        if schema is Draft:return Draft(coverage='missing',missing_authorities=[{'name':NAME,'articles':['第五条'],'reason':'候选仅为合同条文，无法支持彩礼争点'}])
+        raise AssertionError('无相关结论时不应进入复核')
     monkeypatch.setattr(llm,'request_json',model)
     monkeypatch.setattr(sources,'read_official',lambda *a:pytest.fail('offline must not fetch'))
     r=engine.answer(cid,QUESTION,online_research=False)
     assert r['status']=='missing_sources' and r['source_gaps'] and not r['missing_facts'] and not r['citations']
-    assert r['candidate_sources'] and r['rounds']==2 and Draft not in calls
-    assert calls.count(CoverageAudit)==4
-    assert any(e['step']=='检查现有资料可回答的部分' for e in r['trace'])
+    assert r['candidate_sources'] and r['rounds']==1 and calls==[Draft]
+    assert not any(e['step']=='引用校验完成' for e in r['trace'])
 
 
 @pytest.mark.parametrize('has_gap',[False,True])
 @pytest.mark.parametrize('supported',[False,True])
-def test_available_materials_recover_only_verified_partial_conclusions(client,corpus,monkeypatch,has_gap,supported):
+def test_combined_analysis_publishes_only_verified_partial_conclusions(client,corpus,monkeypatch,has_gap,supported):
     cid=create(client,rounds=1);calls=[];draft_evidence=[]
     needs=[{'name':'最高人民法院关于测试争议的规定','articles':['第一条'],'reason':'测试专项条文可能影响个案判断，尚待核对'}] if has_gap else []
     monkeypatch.setattr(sources,'read_official',lambda *a:pytest.fail('offline must not fetch'))
     def model(system,payload,schema,verify=False):
         calls.append(schema)
         if schema is Plan:return Plan(queries=['未支付价款'],authorities=needs)
-        if schema is CoverageAudit:
-            if 'core_coverage' not in payload:
-                return CoverageAudit(selected_ids=[],coverage='missing',missing_authorities=needs,reason='完整问题的专项依据尚未齐备')
-            assert system==engine.AVAILABLE_COVERAGE
-            return CoverageAudit(selected_ids=[payload['candidate_evidence'][0]['id']],coverage='sufficient',reason='仅确认现有条文可支持一项部分分析')
         if schema is Draft:
             assert payload['analysis_scope']=='available_sources'
-            assert payload['coverage']['coverage']=='partial'
-            assert len(payload['evidence'])==1
-            draft_evidence.extend(payload['evidence'])
             row=payload['evidence'][0]
-            return Draft(insufficient=False,claims=[{'text':'这项合成结论仅用于验证已有资料的部分分析流程，不是法律意见。','kind':'rule','section':'answer','evidence':[{'article_id':row['id'],'quote':row['body']}]}])
+            draft_evidence.append(row)
+            return Draft(coverage='partial',insufficient=False,missing_authorities=needs,claims=[{'text':'这项合成结论仅用于验证已有资料的部分分析流程，不是法律意见。','kind':'rule','section':'answer','evidence':[{'article_id':row['id'],'quote':row['body']}]}])
         if schema is Verdict:return Verdict(checks=[{'claim_index':0,'supported':supported,'reason':'合成支持性校验'}])
         raise AssertionError(schema)
     monkeypatch.setattr(llm,'request_json',model)
     response=client.post(f'/api/cases/{cid}/ask',json={'text':'未支付价款怎么办？','online_research':False})
     assert response.status_code==200,response.text
     result=response.json()
-    assert calls==[Plan,CoverageAudit,CoverageAudit,Draft,Verdict]
+    assert calls==[Draft,Verdict]
     assert result['analysis_scope']=='available_sources' and result['coverage']['coverage']=='partial'
     assert bool(result['source_gaps'])==has_gap and result['missing_facts']==[]
     assert result['status']==('partial' if supported else 'missing_sources' if has_gap else 'no_supported_answer')
@@ -180,17 +174,16 @@ def test_available_materials_recover_only_verified_partial_conclusions(client,co
     assert saved['claims']==result['claims'] and saved['source_gaps']==result['source_gaps']
 
 
-def test_available_materials_check_cannot_select_nonexistent_article(client,corpus,monkeypatch):
+def test_combined_analysis_cannot_cite_nonexistent_article(client,corpus,monkeypatch):
     cid=create(client,rounds=1)
     def model(system,payload,schema,verify=False):
-        if schema is Plan:return Plan(queries=['未支付价款'])
-        if schema is CoverageAudit:
-            return CoverageAudit(selected_ids=['fabricated-id'] if 'core_coverage' in payload else [],coverage='partial',reason='合成非法ID测试')
-        raise AssertionError('非法证据不得进入草稿或复核')
+        if schema is Draft:return Draft(claims=[{'text':'不得发布的合成结论','kind':'rule','evidence':[{'article_id':'fabricated-id','quote':'不存在的合成测试原文'}]}])
+        raise AssertionError('非法证据不得进入复核')
     monkeypatch.setattr(llm,'request_json',model)
     result=engine.answer(cid,'未支付价款怎么办？',online_research=False)
     assert not result['claims'] and not result['citations']
-    assert any('候选范围之外' in warning for warning in result['warnings'])
+    assert result['coverage']['selected_ids']==[] and result['coverage']['coverage']=='missing'
+    assert any(e['step']=='引用校验完成' and '通过 0 项' in e['detail'] for e in result['trace'])
 
 
 def test_empty_draft_does_not_report_successful_citation_validation(client,corpus,monkeypatch):

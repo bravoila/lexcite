@@ -200,14 +200,17 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
 
     def acquire():
         if not online or not result['source_gaps']:return False
+        before=len(collector.rows)
         try:
             new=collector.acquire(result['source_gaps'],case['event_date'],case['jurisdiction'],emit)
         except (llm.ModelError,websearch.SearchError,ValueError) as exc:
             warnings.append(str(exc));emit('sources','官方补查未完成',str(exc),'warning')
             return False
-        if new:
-            # New provisions may contain exceptions to an earlier conclusion.
-            result['claims']=[];result['citations']=[]
+        finally:
+            if len(collector.rows)>before:
+                # New provisions may contain exceptions to an earlier conclusion.
+                result['claims']=[];result['citations']=[]
+                result.pop('verification',None)
         return bool(new)
 
     def run():
@@ -260,6 +263,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             ids=tuple(sorted(r['id'] for r in evidence))
             if result['claims'] and ids!=last_ids:
                 result['claims']=[];result['citations']=[]
+                result.pop('verification',None)
             if number>1 and ids==last_ids and (not evidence or plan and plan.action=='clarify'):
                 emit('clarifications','停止无新增依据的重复分析','检索证据未新增，保留已核对的部分和必要事实问题。','warning')
                 break

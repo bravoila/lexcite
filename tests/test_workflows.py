@@ -35,7 +35,7 @@ def set_model():
     llm.save_settings({"provider":"custom","base_url":"http://localhost:9999/v1","model":"test-only","api_key":"secret-test"})
 
 
-def test_coverage_draft_review_flow_and_recall(client,corpus,monkeypatch):
+def test_combined_analysis_review_flow_and_recall(client,corpus,monkeypatch):
     set_model();cid=new_case(client)
     client.post(f"/api/cases/{cid}/memories",json={"text":"付款期限已经届满"})
     calls=[]
@@ -50,12 +50,13 @@ def test_coverage_draft_review_flow_and_recall(client,corpus,monkeypatch):
         return Verdict(checks=[{"claim_index":0,"supported":True,"reason":"matches"}])
     monkeypatch.setattr(llm,"request_json",fake)
     r=client.post(f"/api/cases/{cid}/ask",json={"text":"对方未支付价款怎么办？"}).json()
-    assert r["status"]=="answered" and len(r["claims"])==1 and len(calls)==4
+    assert r["status"]=="answered" and len(r["claims"])==1 and len(calls)==2
     assert calls[0]["confirmed_facts"]==["付款期限已经届满"]
     assert r["citations"][0]["number"]=="第五百七十九条"
     assert r["verification"]["legal_correctness_guaranteed"] is False
     client.post(f"/api/cases/{cid}/ask",json={"text":"如果他仍不支付呢？"})
-    assert calls[4]["previous_user_messages_unconfirmed"]==["对方未支付价款怎么办？"]
+    followup=next(payload for payload in calls[2:] if 'evidence' in payload)
+    assert followup["previous_user_messages_unconfirmed"]==["对方未支付价款怎么办？"]
 
 
 def test_unsupported_or_unavailable_verification_blocks(client,corpus,monkeypatch):

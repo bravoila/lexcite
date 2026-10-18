@@ -142,6 +142,7 @@ async function wait(predicate,label){for(let i=0;i<120;i++){if(predicate())retur
  const citation={...prior.citations[0],label:1};
  const partial={...prior,status:'partial',summary:'以下仅回答现有资料能够支持的部分。',citations:[citation],
   claims:[{text:'合成的现有资料分析结论。',kind:'rule',section:'answer',citations:[1]}],
+  model_runs:[{round:1,stage:'法律分析',model:'fixture',status:'completed',elapsed_seconds:.5,payload_characters:200,usage:null},{round:1,stage:'证据复核',model:'fixture',status:'completed',elapsed_seconds:.2,payload_characters:210,usage:{total_tokens:150}}],
   source_gaps:[{name:'最高人民法院关于测试争议的规定',articles:['第一条'],reason:'建议核对专项条件 <img src=x onerror=alert(1)>',detail:'资料库未找到匹配的标准法规名称。'}]};
  displayedCase.messages=[{id:'available-materials-fixture',role:'assistant',payload:partial}];
  caseResponses.push(displayedCase);click(`[data-case="${caseId}"]`);
@@ -150,6 +151,9 @@ async function wait(predicate,label){for(let i=0;i<120;i++){if(predicate())retur
  assert.match($('.source-gaps h3').textContent,/推荐补充资料/);
  assert.match($('.source-gaps').textContent,/建议核对专项条件/);
  assert.match($('.source-gaps').textContent,/不作为本次结论依据/);
+ assert.match($('.model-performance').textContent,/模型调用耗时 · 2 次/);
+ assert.match($('.model-performance').textContent,/供应商未提供/);
+ assert.match($('.model-performance').textContent,/总 token：150/);
  assert($('.available-conclusions').compareDocumentPosition($('.source-gaps'))&w.Node.DOCUMENT_POSITION_FOLLOWING);
  assert.equal($('.source-gaps img'),null);
  click('.available-conclusions .citation-btn');await wait(()=>$('#citation-dialog').open,'available materials citation');

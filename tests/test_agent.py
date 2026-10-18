@@ -18,6 +18,56 @@ def good(payload):
     return Draft(insufficient=False,claims=[{"text":"如果存在不履行义务的情形，应结合合同约定及条文适用条件判断责任。", "kind":"inference", "evidence":[{"article_id":row['id'],"quote":row['body']}]}])
 
 
+@pytest.mark.parametrize('partial',[False,True])
+def test_normal_path_is_two_calls_even_with_recommendations(client,corpus,monkeypatch,partial):
+    cid=setup(client);calls=[]
+    llm.save_settings({'provider':'custom','base_url':'http://localhost:9999','model':'fixture','agent_rounds':3,'show_reasoning':False})
+    def model(system,payload,schema,verify=False):
+        calls.append(schema)
+        if schema is Draft:
+            draft=good(payload)
+            if partial:
+                draft=Draft.model_validate(draft.model_dump()|{'insufficient':True,'missing_authorities':[{'name':'最高人民法院关于测试争议的规定','reason':'合成补充建议'}]})
+            return draft
+        if schema is Verdict:
+            assert verify and 'previous_attempt' not in payload and 'repair_feedback' not in payload
+            return Verdict(checks=[{'claim_index':0,'supported':True,'reason':'合成测试'}])
+        raise AssertionError('普通路径不应调用规划或单独的覆盖检查')
+    monkeypatch.setattr(llm,'request_json',model)
+    result=client.post(f'/api/cases/{cid}/ask',json={'text':'未支付价款怎么办？','online_research':False}).json()
+    assert calls==[Draft,Verdict] and result['model_calls']==2 and result['rounds']==1
+    assert result['status']==('partial' if partial else 'answered')
+    assert bool(result['source_gaps'])==partial and not result['reasoning']
+    assert all(run['status']=='completed' and run['usage'] is None and run['elapsed_seconds']>=0 for run in result['model_runs'])
+    exported=client.get(f'/api/cases/{cid}/export').text
+    assert '模型调用耗时' in exported and '供应商 token 用量：未提供' in exported
+
+
+def test_new_sources_invalidate_old_partial_claims_before_failed_reanalysis(client,corpus,monkeypatch):
+    from app.research_agent import authorities
+    cid=setup(client);drafts=[];need={'name':'最高人民法院关于测试新增例外的规定','reason':'合成的新增法源'}
+    row=retrieval.corpus('2025-01-01','全国')[0][0]
+    def acquire(self,needs,*args):
+        new=row|{'id':'synthetic-new-source','law_id':'synthetic-official-law','name':need['name'],'canonical_name':need['name'],'number':'第一条','body':'测试新增例外条文，只用于验证重新复核机制，不是真实法律。'}
+        self.rows.append(new)
+        return [new]
+    monkeypatch.setattr(authorities.ResearchSources,'acquire',acquire)
+    def model(system,payload,schema,verify=False):
+        if schema is Plan:return Plan(authorities=[need])
+        if schema is Draft:
+            drafts.append(payload)
+            if len(drafts)>1:raise llm.ModelError('合成接口失败',fatal=True,status_code=400)
+            draft=good(payload);draft.claims.append(draft.claims[0].model_copy())
+            return draft
+        if schema is Verdict:return Verdict(checks=[{'claim_index':0,'supported':True,'reason':'合成部分支持'},{'claim_index':1,'supported':False,'reason':'需查询例外'}])
+        raise AssertionError(schema)
+    monkeypatch.setattr(llm,'request_json',model)
+    result=engine.answer(cid,'未支付价款怎么办？',online_research=True)
+    assert len(drafts)==2 and any(r['id']=='synthetic-new-source' for r in drafts[-1]['evidence'])
+    assert result['status']=='model_error' and not result['claims'] and not result['citations']
+    assert 'verification' not in result
+
+
 def test_repair_invalid_quote_then_succeed(client,corpus,monkeypatch):
     cid=setup(client); calls=[]; events=[]
     def model(system,payload,schema,verify=False):
@@ -33,8 +83,9 @@ def test_repair_invalid_quote_then_succeed(client,corpus,monkeypatch):
         return Verdict(checks=[{"claim_index":0,"supported":True,"reason":"fixture"}])
     monkeypatch.setattr(llm,'request_json',model)
     result=engine.answer(cid,'未支付价款怎么办',progress=events.append)
-    assert result['status']=='answered' and result['rounds']==2 and result['model_calls']==7
-    assert calls[3][1]['repair_feedback'][0]['reason']=='引用原文与法条不一致'
+    assert result['status']=='answered' and result['rounds']==2 and result['model_calls']==4
+    assert [schema for schema,payload in calls]==[Draft,Plan,Draft,Verdict]
+    assert calls[1][1]['repair_feedback'][0]['reason']=='引用原文与法条不一致'
     assert '本段是假造引文' not in json.dumps(result,ensure_ascii=False)
     assert any(e.get('stage')=='repair' for e in events)
     assert events[-1]['stage']=='done' and events[-1]['status']=='completed'
@@ -56,7 +107,7 @@ def test_semantic_failure_triggers_new_retrieval_and_repair(client,corpus,monkey
     monkeypatch.setattr(retrieval,'search',search);monkeypatch.setattr(llm,'request_json',model)
     r=engine.answer(cid,'未支付价款怎么办')
     assert r['status']=='answered' and len(searches)==2 and searches[0]!=searches[1]
-    assert plans[1]['repair_feedback'][0]['reason']=='缺少适用条件，请条件化'
+    assert len(plans)==1 and plans[0]['repair_feedback'][0]['reason']=='缺少适用条件，请条件化'
 
 
 def test_exhausted_agent_never_publishes_invalid_claim(client,corpus,monkeypatch):
@@ -69,7 +120,7 @@ def test_exhausted_agent_never_publishes_invalid_claim(client,corpus,monkeypatch
         return Verdict(checks=[{"claim_index":0,"supported":False,"reason":"fixture rejection"}])
     monkeypatch.setattr(llm,'request_json',model)
     r=engine.answer(cid,'未支付价款怎么办')
-    assert r['rounds']==3 and r['model_calls']==12 and not r['claims'] and not r['citations'] and r['candidate_sources']
+    assert r['rounds']==3 and r['model_calls']==8 and not r['claims'] and not r['citations'] and r['candidate_sources']
     assert r['status']=='no_supported_answer'
 
 
@@ -111,9 +162,9 @@ def test_job_progress_idempotency_and_reload(client,corpus,monkeypatch):
     def model(system,payload,schema,verify=False):
         if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
-        if schema is Plan:
-            entered.set(); assert release.wait(4); return Plan()
-        if schema is Draft:return good(payload)
+        if schema is Plan:return Plan()
+        if schema is Draft:
+            entered.set(); assert release.wait(4); return good(payload)
         return Verdict(checks=[{"claim_index":0,"supported":True,"reason":"fixture"}])
     monkeypatch.setattr(llm,'request_json',model)
     body={'text':'未支付价款怎么办','request_id':'repeat-safe'}
@@ -122,7 +173,7 @@ def test_job_progress_idempotency_and_reload(client,corpus,monkeypatch):
         assert response.status_code==202
         jid=response.json()['id'];assert entered.wait(2)
         progress=client.get('/api/research/'+jid).json()
-        assert progress['status']=='running' and progress['events'][-1]['stage']=='plan'
+        assert progress['status']=='running' and progress['events'][-1]['stage']=='draft'
         assert client.get(f'/api/cases/{cid}').json()['active_jobs'][0]['id']==jid
         assert client.post(f'/api/cases/{cid}/research',json=body).json()['id']==jid
         assert client.delete(f'/api/cases/{cid}').status_code==409
@@ -251,10 +302,10 @@ def test_clarification_stops_unproductive_retries(client,corpus,monkeypatch):
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:
             plans.append(1)
-            return Plan(action='clarify',questions=['请补充约定付款日期？']) if len(plans)>1 else Plan()
+            return Plan(action='clarify',questions=['请补充约定付款日期？'])
         if schema is Draft:return good(payload)
         return Verdict(checks=[{'claim_index':0,'supported':False,'reason':'缺少事实'}])
     monkeypatch.setattr(llm,'request_json',model)
     result=engine.answer(cid,'未支付价款怎么办')
-    assert result['rounds']==2 and result['model_calls']==8
+    assert result['rounds']==2 and result['model_calls']==3
     assert result['missing_facts']==['请补充约定付款日期？'] and not result['claims']

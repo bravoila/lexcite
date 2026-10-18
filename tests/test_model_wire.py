@@ -24,7 +24,7 @@ def test_full_http_model_roundtrip(client,corpus):
                 content={"insufficient":False,"claims":[{"text":"在未支付价款的情形下，对方可以请求支付。","kind":"rule","evidence":[{"article_id":a["id"],"quote":a["body"]}]}],"missing_facts":[]}
             else:
                 content={"queries":["未支付价款 请求支付"]}
-            data=json.dumps({"choices":[{"finish_reason":"stop","message":{"content":json.dumps(content,ensure_ascii=False)}}]}).encode()
+            data=json.dumps({"choices":[{"finish_reason":"stop","message":{"content":json.dumps(content,ensure_ascii=False)}}],"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":140}}).encode()
             self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
     server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -34,7 +34,9 @@ def test_full_http_model_roundtrip(client,corpus):
         response=client.post(f"/api/cases/{cid}/ask",json={"text":"对方未支付合同价款可以请求其支付吗？"})
         assert response.status_code==200,response.text
         result=response.json()
-        assert result["status"]=="answered" and len(captured)==4
+        assert result["status"]=="answered" and len(captured)==2
+        assert [run['stage'] for run in result['model_runs']]==['法律分析','证据复核']
+        assert all(run['usage']['total_tokens']==140 and run['elapsed_seconds']>=0 and run['payload_characters']>0 for run in result['model_runs'])
         assert result["citations"][0]["number"]=="第五百七十九条"
     finally:
         server.shutdown();server.server_close();thread.join(timeout=2)

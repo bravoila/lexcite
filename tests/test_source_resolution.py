@@ -129,7 +129,10 @@ def test_engine_criminal_two_requested_articles_with_citations(client,monkeypatc
     def model(system,payload,schema,verify=False):
         if schema is Plan:return Plan(queries=['过失致人死亡'],authorities=[{'name':'《中华人民共和国刑法》','articles':['第十五条','第二百三十三条']}])
         if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if ingest.article_key(r['number']) in [(15,0),(233,0)]],coverage='sufficient',reason='合成管线测试')
-        if schema is Draft:return Draft(insufficient=False,claims=[{'text':'合成测试结论，不是真实法律意见。','kind':'rule','section':'answer','evidence':[{'article_id':r['id'],'quote':r['body']} for r in payload['evidence']]}])
+        if schema is Draft:
+            selected=[r for r in payload['evidence'] if ingest.article_key(r['number']) in [(15,0),(233,0)]]
+            if len(selected)<2:return Draft(missing_authorities=[{'name':'中华人民共和国刑法','articles':['第十五条','第二百三十三条']}])
+            return Draft(insufficient=False,claims=[{'text':'合成测试结论，不是真实法律意见。','kind':'rule','section':'answer','evidence':[{'article_id':r['id'],'quote':r['body']} for r in selected]}])
         if schema is Verdict:return Verdict(checks=[{'claim_index':0,'supported':True,'reason':'合成管线测试'}])
         raise AssertionError(schema)
     monkeypatch.setattr(llm,'request_json',model)
@@ -146,7 +149,7 @@ def test_engine_criminal_two_requested_articles_with_citations(client,monkeypatc
 def test_engine_missing_service_diagnostic_is_in_gap_and_export(client,monkeypatch):
     llm.save_settings({'provider':'custom','base_url':'http://localhost:9999','model':'source-fixture','agent_rounds':1})
     cid=client.post('/api/cases',json={'title':'缺口测试','event_date':'2026-09-25'}).json()['id']
-    monkeypatch.setattr(llm,'request_json',lambda *a,**kw:Plan(authorities=[{'name':'《最高人民法院关于测试纠纷的规定》'}]))
+    monkeypatch.setattr(llm,'request_json',lambda *a,**kw:Draft(missing_authorities=[{'name':'《最高人民法院关于测试纠纷的规定》'}]))
     result=client.post(f'/api/cases/{cid}/ask',json={'text':'处理测试纠纷','online_research':True}).json()
     gap=result['source_gaps'][0]
     assert gap['online_state']=='search_not_configured' and '模型 API 密钥不等于' in gap['online_detail']

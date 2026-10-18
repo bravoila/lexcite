@@ -284,6 +284,11 @@ def export(cid: str):
             lines += ["- " + c["text"] + " " + " ".join(f"[{n}]" for n in c["citations"]) for c in p["claims"]]
             if p.get("retrieval_runs"):
                 lines += ["\n### 本次实际检索方式", *["- "+x["summary"] for x in p["retrieval_runs"]]]
+            if p.get("model_runs"):
+                lines += ["\n### 模型调用耗时"]
+                for run in p["model_runs"]:
+                    usage=run.get("usage")
+                    lines += [f"- 第{run['round']}轮 / {run['stage']} / {run['model']}：{run['elapsed_seconds']}秒，状态 {run['status']}，请求数据 {run['payload_characters']}字符，供应商 token 用量：{usage if usage is not None else '未提供'}"]
             if p.get("missing_facts"):
                 lines += ["\n### 待补充", *["- "+x for x in p["missing_facts"]]]
             if p.get("source_gaps") or p.get("legal_issues"):
