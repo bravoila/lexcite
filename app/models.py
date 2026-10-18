@@ -98,28 +98,6 @@ class SettingsInput(BaseModel):
         return value.rstrip("/")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class SearchSettingsInput(BaseModel):
     provider: Literal["none", "bocha", "searxng"] = "none"
     base_url: str = Field(default="https://api.bochaai.com/v1", max_length=1500)
@@ -136,5 +114,3 @@ class SearchSettingsInput(BaseModel):
         if self.provider == "bocha" and self.base_url != "https://api.bochaai.com/v1":
             raise ValueError("博查使用官方固定地址 https://api.bochaai.com/v1")
         return self
-
-

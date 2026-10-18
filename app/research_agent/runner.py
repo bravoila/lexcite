@@ -1,13 +1,19 @@
-from .prompts import PLAN, DRAFT, VERIFY, CLARIFY, FACTS
-from .verification import validate_claim
+"""Bounded legal research with source-grounded analysis and independent review."""
 import json
 import re
 import time
 from .. import db, llm, websearch
+from ..ingest import article_key
 from . import retrieval, authorities, context as case_state
+from .prompts import PLAN, DRAFT, VERIFY, CLARIFY, FACTS
 from .schemas import Draft, Plan, Verdict, ClarificationAudit, FactExtraction, CoverageAudit, SourceMetadata
+from .verification import validate_claim
+
+
 class BudgetExceeded(InterruptedError):
     pass
+
+
 def unique_needs(items):
     result, grouped=[],{}
     for item in items:
@@ -29,6 +35,7 @@ def split_questions(items):
         if re.search(r'evidence|法源|法律依据|司法解释.*(?:缺|未提供)|(?:缺少|未提供|未检索).*(?:法条|法规|依据)',item,re.I):legal.append(item)
         else:facts.append(item)
     return facts,legal
+
 
 def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_query='', online_research=None):
     started=time.monotonic();s=llm.settings();deadline=started+s['agent_timeout']
@@ -118,7 +125,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
     def gaps(needs):
         remaining=[]
         for need in needs:
-            if any(retrieval.matches_law(row,need['name']) and (not need.get('articles') or all(any(r['law_id']==row['law_id'] and ingest_key(n)==ingest_key(r['number']) for r in collector.rows) for n in need['articles'])) for row in collector.rows):continue
+            if any(retrieval.matches_law(row,need['name']) and (not need.get('articles') or all(any(r['law_id']==row['law_id'] and article_key(n)==article_key(r['number']) for r in collector.rows) for n in need['articles'])) for row in collector.rows):continue
             remaining.append(need)
         return retrieval.authority_gaps(remaining,case['event_date'],case['jurisdiction'])
 
@@ -200,7 +207,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
 
     def acquire():
         if not online or not result['source_gaps']:return False
-        before=len(collector.rows)
+        before=len(collector.rows);source_started=time.monotonic()
         try:
             new=collector.acquire(result['source_gaps'],case['event_date'],case['jurisdiction'],emit)
         except (llm.ModelError,websearch.SearchError,ValueError) as exc:
@@ -211,6 +218,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
                 # New provisions may contain exceptions to an earlier conclusion.
                 result['claims']=[];result['citations']=[]
                 result.pop('verification',None)
+            emit('source_timing','官方补查耗时',f"耗时 {round(time.monotonic()-source_started,3)} 秒；新增 {len(collector.rows)-before} 条临时原文。",'completed' if len(collector.rows)>before else 'warning')
         return bool(new)
 
     def run():
@@ -328,8 +336,3 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         with llm.controlled(check,deadline), retrieval.observe(on_retrieval):return run()
     except BudgetExceeded as exc:
         warnings.append(str(exc)+'，保留已经通过校验的部分。');return finish()
-
-
-def ingest_key(number):
-    from ..ingest import article_key
-    return article_key(number)

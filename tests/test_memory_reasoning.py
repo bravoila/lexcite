@@ -109,15 +109,16 @@ def wire(monkeypatch,handler):
 @pytest.mark.parametrize('provider,thinking,json_mode,forced',[('dashscope','auto','auto',False),('dashscope','enabled','auto',False),('dashscope','disabled','auto',True),('dashscope','enabled','strict',True),('deepseek','auto','prompt',False),('ollama','enabled','auto',True)])
 def test_json_compatibility_and_reasoning_sse(client,monkeypatch,provider,thinking,json_mode,forced):
     llm.save_settings({'provider':provider,'base_url':'http://localhost:9999/v1','model':'fixture','thinking_mode':thinking,'json_mode':json_mode})
-    fragments=[]
+    fragments=[];usage=[]
     def handler(req):
         body=json.loads(req.content);assert ('response_format' in body)==forced and body['stream']
-        chunks=[{'choices':[{'delta':{'reasoning_content':'接口测试片段一'}}]}, {'choices':[{'delta':{'reasoning':'；片段二'}}]}, {'choices':[{'delta':{'content':'{"queries":["完整结果"]}'},'finish_reason':'stop'}]}]
+        chunks=[{'choices':[{'delta':{'reasoning_content':'接口测试片段一'}}]}, {'choices':[{'delta':{'reasoning':'；片段二'}}]}, {'choices':[{'delta':{'content':'{"queries":["完整结果"]}'},'finish_reason':'stop'}]},{'choices':[],'usage':{'prompt_tokens':80,'completion_tokens':20,'total_tokens':100}}]
         return httpx.Response(200,headers={'Content-Type':'text/event-stream'},text='\n\n'.join('data: '+json.dumps(c) for c in chunks)+'\n\ndata: [DONE]\n')
     wire(monkeypatch,handler)
-    with llm.capture_reasoning(fragments.append):value=llm.request_json('测试',{},Plan)
+    with llm.capture_reasoning(fragments.append),llm.capture_usage(usage.append):value=llm.request_json('测试',{},Plan)
     assert ''.join(fragments)=='接口测试片段一；片段二' and value.queries==['完整结果']
     assert '接口测试' not in value.model_dump_json()
+    assert usage==[{'prompt_tokens':80,'completion_tokens':20,'total_tokens':100}]
 
 
 def test_request_options_are_scoped_and_usage_is_provider_reported(client,monkeypatch):

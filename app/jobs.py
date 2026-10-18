@@ -5,7 +5,7 @@ import threading
 from fastapi import HTTPException
 from . import db
 from .research_agent import context as case_state
-from . import research_agent as engine
+from . import research_agent
 
 MODEL_LOCK = threading.Lock()
 _threads = set()
@@ -115,7 +115,7 @@ def _run(jid, cid, payload):
         with db.connect() as c:
             c.execute("UPDATE research_jobs SET status=?,error=?,updated=? WHERE id=?", (status, message, db.now(), jid))
     try:
-        result = engine.answer(cid, payload["text"], payload["mode"], progress=progress, cancelled=cancelled, web_query=payload["web_query"], online_research=payload.get("online_research"))
+        result = research_agent.answer(cid, payload["text"], payload["mode"], progress=progress, cancelled=cancelled, web_query=payload["web_query"], online_research=payload.get("online_research"))
         # Commit the pair, result, and completed state together. Repeated polling/reloads
         # cannot append another answer. Cancellation wins until this transaction commits.
         with db.connect() as c:

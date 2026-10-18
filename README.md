@@ -48,6 +48,10 @@ docker compose -f compose.yaml -f compose.ollama.yaml exec ollama ollama pull qw
 
 界面选 Ollama，地址填 `http://ollama:11434/v1`，模型填 `qwen3:8b`。此组合默认 CPU，速度取决于硬件；GPU 配置见部署手册。
 
+## 法律研究核心
+
+法律研究核心集中在 [`app/research_agent/`](app/research_agent/)，由 `runner.py` 编排，提示词、数据结构、案件上下文、检索、官方补查和引用校验分别维护。普通问题直接检索后执行“分析＋独立复核”，通常两次核心模型调用；通过的部分结论与推荐补充资料分开输出，校验失败时才修正。页面的“模型调用耗时”显示各阶段实测用时和供应商报告的 token 用量。模块说明见 [核心研究流程](docs/CORE_RESEARCH.md)。
+
 ## 配置语义检索与重排
 
 “模型与设置”向下找到“语义检索与重排”。选择混合模式，分别配置两个服务：阿里百炼、硅基流动或本地服务。分析用DeepSeek时，也可单独选择硅基流动向量和重排，或Ollama向量配本地重排。服务不会继承聊天密钥。

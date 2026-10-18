@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from . import auth, db, ingest, llm, sources, jobs, websearch, indexing, retrieval_services
 from .research_agent import retrieval, context as case_state
-from . import research_agent as engine
+from . import research_agent
 from .models import AskInput, CaseInput, LawInput, LawURLInput, LawPreviewInput, MemoryInput, SettingsInput, SearchSettingsInput
 from .research_agent.schemas import Plan
 
@@ -214,7 +214,7 @@ def ask(cid: str, value: AskInput):
         raise HTTPException(409, "当前有分析或索引任务进行中，请稍后重试")
     try:
         # The current question is provided separately and appended only after completion.
-        result = engine.answer(cid, value.text, value.mode, web_query=value.web_query, online_research=value.online_research)
+        result = research_agent.answer(cid, value.text, value.mode, web_query=value.web_query, online_research=value.online_research)
         user_id, mid = db.uid(), db.uid()
         with db.connect() as c:
             for message_id, role, body in [(user_id, "user", {"text": value.text}), (mid, "assistant", result)]:

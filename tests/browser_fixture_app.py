@@ -53,7 +53,11 @@ def fixture_model(system, payload, schema, verify=False):
             name='《最高人民法院关于测试纠纷的规定》' if '目录外' in payload['question'] else '《中华人民共和国刑法》'
             return Plan(queries=['过失致人死亡'],authorities=[{'name':name,'articles':['第十五条','第二百三十三条']}])
         if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if r['number'] in ('第15条','第233条')],coverage='sufficient',reason='合成数据，仅验证法源流程')
-        if schema is Draft:return Draft(insufficient=False,claims=[{'text':'刑法来源流程的合成测试结论，不是真实法律意见。','kind':'rule','section':'answer','evidence':[{'article_id':r['id'],'quote':r['body']} for r in payload['evidence']]}])
+        if schema is Draft:
+            name='最高人民法院关于测试纠纷的规定' if '目录外' in payload['question'] else '中华人民共和国刑法'
+            selected=[r for r in payload['evidence'] if r['number'] in ('第15条','第233条') and r['name']=='中华人民共和国刑法']
+            if len(selected)<2:return Draft(missing_authorities=[{'name':name,'articles':['第十五条','第二百三十三条']}])
+            return Draft(insufficient=False,claims=[{'text':'刑法来源流程的合成测试结论，不是真实法律意见。','kind':'rule','section':'answer','evidence':[{'article_id':r['id'],'quote':r['body']} for r in selected]}])
         if schema is Verdict:return Verdict(checks=[{'claim_index':0,'supported':True,'reason':'合成数据'}])
 
     if llm.settings()['model']=='core-browser-fixture':
@@ -62,7 +66,7 @@ def fixture_model(system, payload, schema, verify=False):
         if schema is Plan:return Plan(queries=['彩礼纠纷'],authorities=[{'name':CORE_NAME,'articles':['第五条']}])
         if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if r['number']=='第五条' and r['name']==CORE_NAME],coverage='sufficient',reason='浏览器测试候选；不代表真实法律分析')
         if schema is Draft:
-            row=payload['evidence'][0]
+            row=next(r for r in payload['evidence'] if r['number']=='第五条' and r['name']==CORE_NAME)
             return Draft(insufficient=False,claims=[{'text':'此处展示带原文引用的测试结论，供验证新版研究界面。','kind':'rule','section':'answer','evidence':[{'article_id':row['id'],'quote':row['body']}]},{'text':'本轮保留用户已提供的信息，以下内容仅用于验证页面。','kind':'inference','section':'application','evidence':[{'article_id':row['id'],'quote':row['body']}]}])
         if schema is Verdict:return Verdict(checks=[{'claim_index':i,'supported':True,'reason':'浏览器协议测试'} for i in range(len(payload['draft']))])
 
