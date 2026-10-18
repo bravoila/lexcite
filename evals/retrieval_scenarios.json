@@ -1,0 +1,126 @@
+{
+  "name": "LexCite 检索起步验收集（10题；须按实际法库人工复核与扩展）",
+  "not_exhaustive_legal_answers": true,
+  "cases": [
+    {
+      "id": "retrieval-01",
+      "query": "合同没按约定办，可以要求承担什么责任？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国民法典",
+          "article": "第五百七十七条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-02",
+      "query": "不履行合同义务的违约责任",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国民法典",
+          "article": "第五百七十七条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-03",
+      "query": "还没到履行日期，对方就明确说不干了，怎么办？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国民法典",
+          "article": "第五百七十八条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-04",
+      "query": "在履行期限届满前请求承担违约责任",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国民法典",
+          "article": "第五百七十八条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-05",
+      "query": "货交了，对方一直欠着货款不给，怎么办？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国民法典",
+          "article": "第五百七十九条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-06",
+      "query": "当事人未支付价款报酬租金利息",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国民法典",
+          "article": "第五百七十九条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-07",
+      "query": "离婚后，彩礼可以要求对方返还吗？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "最高人民法院关于审理涉彩礼纠纷案件适用法律若干问题的规定",
+          "article": "第五条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-08",
+      "query": "已经登记结婚并共同生活一年，没有生活困难，彩礼没有用于共同生活，离婚后能否请求返还？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "最高人民法院关于审理涉彩礼纠纷案件适用法律若干问题的规定",
+          "article": "第五条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-09",
+      "query": "《中华人民共和国刑法》第十五条如何规定过失？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国刑法",
+          "article": "第十五条"
+        }
+      ]
+    },
+    {
+      "id": "retrieval-10",
+      "query": "《中华人民共和国刑法》第二百三十三条的原文是什么？",
+      "event_date": "2026-09-27",
+      "jurisdiction": "全国",
+      "expected": [
+        {
+          "law": "中华人民共和国刑法",
+          "article": "第二百三十三条"
+        }
+      ]
+    }
+  ]
+}

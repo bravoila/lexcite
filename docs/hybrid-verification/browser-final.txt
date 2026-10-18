@@ -1,0 +1,5 @@
+Running browser_hybrid
+{"passed":11,"checks":["unconfigured-semantic-search-is-visible","ollama-and-aliyun-endpoints-separated","independent-secrets-saved-without-echo","both-service-tests-operational","background-index-progress-and-ready-count","answer-displays-actual-hybrid-and-rerank-models","semantic-hit-retains-full-original-citation","export-persists-retrieval-provenance","changed-model-ignores-old-vectors-and-shows-failure","mobile-failure-visible-no-overflow","no-javascript-errors"]}
+Running browser_agent
+{"passed":17,"checks":["job-running-visible","reload-resumes-real-job","invalid-quote-enters-repair","repaired-answer-saved-once","export-includes-agent-trace","web-lead-read-but-unreviewed","reviewed-citation-opens","online-lead-enters-import-review","cancel-keeps-unfinished-answer-out","thinking-and-rounds-settings-save","separate-search-key-save","guide-provider-tabs","guide-keyboard-tabs","guide-deep-link-reveals-panel","guide-print-includes-all-providers","guide-mobile-width","no-javascript-errors"]}
+Failed: []

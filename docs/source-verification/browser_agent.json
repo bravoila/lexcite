@@ -1,0 +1,22 @@
+{
+  "browser": "153.0.8010.0",
+  "checks": [
+    "job-running-visible",
+    "reload-resumes-real-job",
+    "invalid-quote-enters-repair",
+    "repaired-answer-saved-once",
+    "export-includes-agent-trace",
+    "web-lead-read-but-unreviewed",
+    "reviewed-citation-opens",
+    "online-lead-enters-import-review",
+    "cancel-keeps-unfinished-answer-out",
+    "thinking-and-rounds-settings-save",
+    "separate-search-key-save",
+    "guide-provider-tabs",
+    "guide-keyboard-tabs",
+    "guide-deep-link-reveals-panel",
+    "guide-print-includes-all-providers",
+    "guide-mobile-width",
+    "no-javascript-errors"
+  ]
+}

@@ -1,0 +1,49 @@
+services:
+  lexcite:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${LEXCITE_BIND:-127.0.0.1}:${LEXCITE_PORT:-8080}:8080"
+    environment:
+      LEXCITE_ADMIN_PASSWORD: ${LEXCITE_ADMIN_PASSWORD:-}
+      LEXCITE_SECURE_COOKIE: ${LEXCITE_SECURE_COOKIE:-0}
+      LEXCITE_PUBLIC_URL: ${LEXCITE_PUBLIC_URL:-}
+      MODEL_PROFILE: ${MODEL_PROFILE:-local}
+      MODEL_LOCAL_PROVIDER: ${MODEL_LOCAL_PROVIDER:-}
+      MODEL_LOCAL_BASE_URL: ${MODEL_LOCAL_BASE_URL:-}
+      MODEL_LOCAL_NAME: ${MODEL_LOCAL_NAME:-}
+      MODEL_LOCAL_API_KEY: ${MODEL_LOCAL_API_KEY:-}
+      MODEL_CLOUD_PROVIDER: ${MODEL_CLOUD_PROVIDER:-}
+      MODEL_CLOUD_BASE_URL: ${MODEL_CLOUD_BASE_URL:-}
+      MODEL_CLOUD_NAME: ${MODEL_CLOUD_NAME:-}
+      MODEL_CLOUD_API_KEY: ${MODEL_CLOUD_API_KEY:-}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_TIMEOUT: ${EMBEDDING_TIMEOUT:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      RERANKER_PROVIDER: ${RERANKER_PROVIDER:-}
+      RERANKER_BASE_URL: ${RERANKER_BASE_URL:-}
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
+      RERANKER_TIMEOUT: ${RERANKER_TIMEOUT:-}
+      RERANKER_API_KEY: ${RERANKER_API_KEY:-}
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-}
+      SEARCH_BASE_URL: ${SEARCH_BASE_URL:-}
+      SEARCH_TIMEOUT: ${SEARCH_TIMEOUT:-}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+    volumes:
+      - lexcite_data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp
+volumes:
+  lexcite_data:

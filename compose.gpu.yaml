@@ -1,0 +1,11 @@
+# NVIDIA GPU override for the optional Ollama service.
+# Requires NVIDIA Container Toolkit and a Compose version supporting GPU reservations.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

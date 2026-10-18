@@ -1,0 +1,74 @@
+{
+  "mode": "offline_retrieval_fixture",
+  "created": "2026-09-26T00:15:48+00:00",
+  "note": "Small smoke fixture, not an independent legal benchmark. Human review fields intentionally unset.",
+  "hit_at_10": 1.0,
+  "cases": [
+    {
+      "id": "payment",
+      "retrieved_articles": [
+        "第五百七十九条",
+        "第五百七十八条"
+      ],
+      "hit_at_10": true,
+      "empty_expected_pass": null,
+      "warnings": [],
+      "human_legal_correctness": null,
+      "human_citation_entailment": null
+    },
+    {
+      "id": "breach",
+      "retrieved_articles": [
+        "第五百七十七条",
+        "第五百七十八条"
+      ],
+      "hit_at_10": true,
+      "empty_expected_pass": null,
+      "warnings": [],
+      "human_legal_correctness": null,
+      "human_citation_entailment": null
+    },
+    {
+      "id": "anticipatory",
+      "retrieved_articles": [
+        "第五百七十八条",
+        "第五百七十七条",
+        "第五百七十九条"
+      ],
+      "hit_at_10": true,
+      "empty_expected_pass": null,
+      "warnings": [],
+      "human_legal_correctness": null,
+      "human_citation_entailment": null
+    },
+    {
+      "id": "arabic_number",
+      "retrieved_articles": [
+        "第五百七十七条"
+      ],
+      "hit_at_10": true,
+      "empty_expected_pass": null,
+      "warnings": [],
+      "human_legal_correctness": null,
+      "human_citation_entailment": null
+    },
+    {
+      "id": "historical",
+      "retrieved_articles": [],
+      "hit_at_10": null,
+      "empty_expected_pass": true,
+      "warnings": [],
+      "human_legal_correctness": null,
+      "human_citation_entailment": null
+    },
+    {
+      "id": "out_of_scope",
+      "retrieved_articles": [],
+      "hit_at_10": null,
+      "empty_expected_pass": null,
+      "warnings": [],
+      "human_legal_correctness": null,
+      "human_citation_entailment": null
+    }
+  ]
+}

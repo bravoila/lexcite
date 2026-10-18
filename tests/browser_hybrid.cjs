@@ -1,0 +1,33 @@
+// Real Chromium UI and HTTP API; embedding/rerank/model replies are synthetic.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const base=process.env.LEXCITE_TEST_URL,output=path.resolve(process.env.LEXCITE_BROWSER_OUTPUT||'test-results/hybrid');fs.mkdirSync(output,{recursive:true});
+let browser;const checks=[];
+(async()=>{
+ browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE,args:JSON.parse(process.env.CHROMIUM_ARGS||'[]')});
+ const context=await browser.newContext({viewport:{width:1280,height:900}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(base);await page.locator('#password').fill(process.env.LEXCITE_TEST_PASSWORD);await page.locator('#login-button').click();await page.locator('#workspace').waitFor();
+ async function api(route,data,method='POST'){const r=await context.request.fetch(base+'/api'+route,{method,headers:{'X-Lexcite':'1'},...(data?{data}:{})});assert(r.ok(),await r.text());return r.json();}
+ await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>document.querySelector('#index-status').textContent.includes('未配置'));
+ checks.push('unconfigured-semantic-search-is-visible');
+ await page.locator('#embedding-provider').selectOption('ollama');assert.equal(await page.locator('#embedding-name').inputValue(),'qwen3-embedding:0.6b');
+ await page.locator('#embedding-provider').selectOption('dashscope');assert.equal(await page.locator('#embedding-url').inputValue(),'https://dashscope.aliyuncs.com/compatible-mode/v1');assert((await page.locator('#embedding-url-note').innerText()).includes('北京'));
+ await page.locator('#reranker-provider').selectOption('dashscope');assert.equal(await page.locator('#reranker-url').inputValue(),'https://dashscope.aliyuncs.com/api/v1');assert((await page.locator('#reranker-url-note').innerText()).includes('/services/rerank/text-rerank/text-rerank'));checks.push('ollama-and-aliyun-endpoints-separated');
+ for(const [kind,model] of [['embedding','hybrid-browser-embedding'],['reranker','hybrid-browser-reranker']]){await page.locator('#'+kind+'-provider').selectOption('custom');await page.locator('#'+kind+'-name').fill(model);await page.locator('#'+kind+'-url').fill('http://localhost:9998/v1');await page.locator('#'+kind+'-key').fill(kind+'-fixture-secret');}
+ await page.locator('#auto-index').uncheck();await page.locator('#retrieval-settings-form button[type="submit"]').click();await page.waitForFunction(()=>document.querySelector('#retrieval-result').textContent.includes('已保存'));
+ const saved=await api('/retrieval/settings',null,'GET');assert(saved.embedding.has_api_key&&saved.reranker.has_api_key);assert(!JSON.stringify(saved).includes('fixture-secret'));checks.push('independent-secrets-saved-without-echo');
+ await page.locator('#test-embedding').click();await page.waitForFunction(()=>document.querySelector('#retrieval-result').textContent.includes('实际维度 2'));await page.locator('#test-reranker').click();await page.waitForFunction(()=>document.querySelector('#retrieval-result').textContent.includes('2 项有效分数'));checks.push('both-service-tests-operational');
+ for(const [name,text] of [['测试照护规则','第一条 监护人应当履行照管及保护职责。'],['测试道路规则','第一条 车辆应当靠右侧通行。']]){const law=await api('/laws',{name,version:'合成测试',valid_from:'2021-01-01',text});await api('/laws/'+law.id+'/review',{confirmed:true,valid_from:'2021-01-01'});}
+ await page.locator('#reindex').click();await page.waitForFunction(()=>document.querySelector('#index-status').textContent.includes('已索引 2'));checks.push('background-index-progress-and-ready-count');
+ await page.locator('#index-status').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(output,'hybrid-settings.png')});
+ await api('/settings',{provider:'custom',base_url:'http://localhost:9999/v1',model:'hybrid-browser-analysis',agent_rounds:1});
+ const cid=(await api('/cases',{title:'混合检索 · 合成测试',event_date:'2025-01-01'})).id;await page.reload();await page.locator('#question').fill('怎么帮人看娃');await page.locator('#send').click();await page.waitForFunction(()=>!document.querySelector('#send').disabled);
+ const answer=page.locator('.answer').last();assert.equal(await answer.locator('.claim').count(),1);assert((await answer.locator('.retrieval-proof summary').innerText()).includes('hybrid-browser-embedding'));assert((await answer.locator('.retrieval-proof summary').innerText()).includes('hybrid-browser-reranker'));checks.push('answer-displays-actual-hybrid-and-rerank-models');
+ await answer.locator('.citation-btn').first().click();assert((await page.locator('#citation-body').innerText()).includes('监护人应当履行照管'));await page.locator('#citation-dialog .close').click();checks.push('semantic-hit-retains-full-original-citation');
+ const exported=await context.request.get(base+'/api/cases/'+cid+'/export');assert((await exported.text()).includes('本次实际检索方式'));checks.push('export-persists-retrieval-provenance');
+ await answer.locator('.retrieval-proof summary').click();await page.screenshot({path:path.join(output,'hybrid-answer.png')});
+ await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>document.querySelector('#embedding-name').value==='hybrid-browser-embedding');await page.locator('#embedding-name').fill('hybrid-browser-fail');await page.locator('#auto-index').check();await page.locator('#retrieval-settings-form button[type="submit"]').click();await page.waitForFunction(()=>document.querySelector('#index-status').textContent.includes('索引任务失败'));
+ assert((await page.locator('#index-status').innerText()).includes('失败 1'));assert((await page.locator('#index-status').innerText()).includes('已索引 0'));checks.push('changed-model-ignores-old-vectors-and-shows-failure');
+ await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>document.querySelector('#sidebar').getBoundingClientRect().right<=1);await page.locator('#index-status').scrollIntoViewIfNeeded();assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.screenshot({path:path.join(output,'hybrid-mobile-error.png')});checks.push('mobile-failure-visible-no-overflow');
+ assert.deepEqual(errors,[]);checks.push('no-javascript-errors');fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({browser:browser.version(),checks,synthetic:true},null,2));console.log(JSON.stringify({passed:checks.length,checks}));await browser.close();
+})().catch(async e=>{console.error(e);if(browser)await browser.close();process.exit(1);});

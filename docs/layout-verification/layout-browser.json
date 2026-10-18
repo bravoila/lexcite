@@ -1,0 +1,904 @@
+{
+  "browser": "153.0.8010.0",
+  "checks": [
+    "no-overlap-and-compact-1920x1080",
+    "no-overlap-and-compact-1440x900",
+    "no-overlap-and-compact-1280x720",
+    "no-overlap-and-compact-1024x768",
+    "no-overlap-and-compact-951x600",
+    "no-overlap-and-compact-768x700",
+    "no-overlap-and-compact-390x844",
+    "no-overlap-and-compact-320x640",
+    "long-question-grows-scrolls-without-truncation-and-shrinks",
+    "source-description-follows-selection",
+    "optional-public-search-expands-without-covering-description",
+    "long-case-title-does-not-push-composer-offscreen",
+    "citations-remain-accessible",
+    "no-javascript-errors"
+  ],
+  "measurements": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "scrollWidth": 1920,
+      "header": {
+        "x": 353,
+        "y": 60,
+        "width": 1452,
+        "height": 31,
+        "bottom": 91,
+        "right": 1805
+      },
+      "messages": {
+        "x": 353,
+        "y": 103,
+        "width": 1189,
+        "height": 825.40625,
+        "bottom": 928.40625,
+        "right": 1542
+      },
+      "composer": {
+        "x": 353,
+        "y": 928.40625,
+        "width": 1189,
+        "height": 119.796875,
+        "bottom": 1048.203125,
+        "right": 1542
+      },
+      "question": {
+        "x": 366,
+        "y": 938.40625,
+        "width": 1163,
+        "height": 36,
+        "bottom": 974.40625,
+        "right": 1529
+      },
+      "source": {
+        "x": 446.015625,
+        "y": 982.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 1014.40625,
+        "right": 661.015625
+      },
+      "note": {
+        "x": 366,
+        "y": 1021.40625,
+        "width": 1012.0625,
+        "height": 16.796875,
+        "bottom": 1038.203125,
+        "right": 1378.0625
+      },
+      "send": {
+        "x": 1438.625,
+        "y": 982.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 1014.40625,
+        "right": 1529
+      },
+      "noteOnTop": true,
+      "label": "1920x1080"
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "scrollWidth": 1440,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 1154,
+        "height": 31,
+        "bottom": 91,
+        "right": 1416
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 891,
+        "height": 645.40625,
+        "bottom": 748.40625,
+        "right": 1153
+      },
+      "composer": {
+        "x": 262,
+        "y": 748.40625,
+        "width": 891,
+        "height": 119.796875,
+        "bottom": 868.203125,
+        "right": 1153
+      },
+      "question": {
+        "x": 275,
+        "y": 758.40625,
+        "width": 865,
+        "height": 36,
+        "bottom": 794.40625,
+        "right": 1140
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 802.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 834.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 841.40625,
+        "width": 714.0625,
+        "height": 16.796875,
+        "bottom": 858.203125,
+        "right": 989.0625
+      },
+      "send": {
+        "x": 1049.625,
+        "y": 802.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 834.40625,
+        "right": 1140
+      },
+      "noteOnTop": true,
+      "label": "1440x900"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 465.40625,
+        "bottom": 568.40625,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 568.40625,
+        "width": 731,
+        "height": 119.796875,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 578.40625,
+        "width": 705,
+        "height": 36,
+        "bottom": 614.40625,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 622.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 661.40625,
+        "width": 554.0625,
+        "height": 16.796875,
+        "bottom": 678.203125,
+        "right": 829.0625
+      },
+      "send": {
+        "x": 889.625,
+        "y": 622.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "1280x720"
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "scrollWidth": 1024,
+      "header": {
+        "x": 229,
+        "y": 60,
+        "width": 771,
+        "height": 31,
+        "bottom": 91,
+        "right": 1000
+      },
+      "messages": {
+        "x": 229,
+        "y": 103,
+        "width": 508,
+        "height": 475.40625,
+        "bottom": 578.40625,
+        "right": 737
+      },
+      "composer": {
+        "x": 229,
+        "y": 578.40625,
+        "width": 508,
+        "height": 157.796875,
+        "bottom": 736.203125,
+        "right": 737
+      },
+      "question": {
+        "x": 242,
+        "y": 588.40625,
+        "width": 482,
+        "height": 36,
+        "bottom": 624.40625,
+        "right": 724
+      },
+      "source": {
+        "x": 322.015625,
+        "y": 632.40625,
+        "width": 182.984375,
+        "height": 32,
+        "bottom": 664.40625,
+        "right": 505
+      },
+      "note": {
+        "x": 242,
+        "y": 709.40625,
+        "width": 331.0625,
+        "height": 16.796875,
+        "bottom": 726.203125,
+        "right": 573.0625
+      },
+      "send": {
+        "x": 633.625,
+        "y": 670.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 702.40625,
+        "right": 724
+      },
+      "noteOnTop": true,
+      "label": "1024x768"
+    },
+    {
+      "width": 951,
+      "height": 600,
+      "scrollWidth": 951,
+      "header": {
+        "x": 229,
+        "y": 60,
+        "width": 698,
+        "height": 31,
+        "bottom": 91,
+        "right": 927
+      },
+      "messages": {
+        "x": 229,
+        "y": 103,
+        "width": 435,
+        "height": 286.609375,
+        "bottom": 389.609375,
+        "right": 664
+      },
+      "composer": {
+        "x": 229,
+        "y": 389.609375,
+        "width": 435,
+        "height": 178.59375,
+        "bottom": 568.203125,
+        "right": 664
+      },
+      "question": {
+        "x": 242,
+        "y": 399.609375,
+        "width": 409,
+        "height": 36,
+        "bottom": 435.609375,
+        "right": 651
+      },
+      "source": {
+        "x": 322.015625,
+        "y": 443.609375,
+        "width": 215,
+        "height": 32,
+        "bottom": 475.609375,
+        "right": 537.015625
+      },
+      "note": {
+        "x": 242,
+        "y": 520.609375,
+        "width": 409,
+        "height": 16.796875,
+        "bottom": 537.40625,
+        "right": 651
+      },
+      "send": {
+        "x": 560.625,
+        "y": 481.609375,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 513.609375,
+        "right": 651
+      },
+      "noteOnTop": true,
+      "label": "951x600"
+    },
+    {
+      "width": 768,
+      "height": 700,
+      "scrollWidth": 768,
+      "header": {
+        "x": 229,
+        "y": 60,
+        "width": 515,
+        "height": 31,
+        "bottom": 91,
+        "right": 744
+      },
+      "messages": {
+        "x": 229,
+        "y": 103,
+        "width": 515,
+        "height": 420,
+        "bottom": 523,
+        "right": 744
+      },
+      "composer": {
+        "x": 229,
+        "y": 523,
+        "width": 515,
+        "height": 157.796875,
+        "bottom": 680.796875,
+        "right": 744
+      },
+      "question": {
+        "x": 242,
+        "y": 533,
+        "width": 489,
+        "height": 36,
+        "bottom": 569,
+        "right": 731
+      },
+      "source": {
+        "x": 322.015625,
+        "y": 577,
+        "width": 189.984375,
+        "height": 32,
+        "bottom": 609,
+        "right": 512
+      },
+      "note": {
+        "x": 242,
+        "y": 654,
+        "width": 338.0625,
+        "height": 16.796875,
+        "bottom": 670.796875,
+        "right": 580.0625
+      },
+      "send": {
+        "x": 640.625,
+        "y": 615,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 647,
+        "right": 731
+      },
+      "noteOnTop": true,
+      "label": "768x700"
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "scrollWidth": 390,
+      "header": {
+        "x": 14,
+        "y": 56,
+        "width": 362,
+        "height": 60.515625,
+        "bottom": 116.515625,
+        "right": 376
+      },
+      "messages": {
+        "x": 14,
+        "y": 128.515625,
+        "width": 362,
+        "height": 506.390625,
+        "bottom": 634.90625,
+        "right": 376
+      },
+      "composer": {
+        "x": 14,
+        "y": 634.90625,
+        "width": 362,
+        "height": 179.59375,
+        "bottom": 814.5,
+        "right": 376
+      },
+      "question": {
+        "x": 25,
+        "y": 644.90625,
+        "width": 340,
+        "height": 36,
+        "bottom": 680.90625,
+        "right": 365
+      },
+      "source": {
+        "x": 105.015625,
+        "y": 688.90625,
+        "width": 259.984375,
+        "height": 32,
+        "bottom": 720.90625,
+        "right": 365
+      },
+      "note": {
+        "x": 25,
+        "y": 765.90625,
+        "width": 340,
+        "height": 16.796875,
+        "bottom": 782.703125,
+        "right": 365
+      },
+      "send": {
+        "x": 274.625,
+        "y": 726.90625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 758.90625,
+        "right": 365
+      },
+      "noteOnTop": true,
+      "label": "390x844"
+    },
+    {
+      "width": 320,
+      "height": 640,
+      "scrollWidth": 320,
+      "header": {
+        "x": 14,
+        "y": 4,
+        "width": 292,
+        "height": 60.515625,
+        "bottom": 64.515625,
+        "right": 306
+      },
+      "messages": {
+        "x": 14,
+        "y": 76.515625,
+        "width": 292,
+        "height": 384,
+        "bottom": 460.515625,
+        "right": 306
+      },
+      "composer": {
+        "x": 14,
+        "y": 460.515625,
+        "width": 292,
+        "height": 179.59375,
+        "bottom": 640.109375,
+        "right": 306
+      },
+      "question": {
+        "x": 25,
+        "y": 470.515625,
+        "width": 270,
+        "height": 36,
+        "bottom": 506.515625,
+        "right": 295
+      },
+      "source": {
+        "x": 105.015625,
+        "y": 514.515625,
+        "width": 189.984375,
+        "height": 32,
+        "bottom": 546.515625,
+        "right": 295
+      },
+      "note": {
+        "x": 25,
+        "y": 591.515625,
+        "width": 270,
+        "height": 16.796875,
+        "bottom": 608.3125,
+        "right": 295
+      },
+      "send": {
+        "x": 204.625,
+        "y": 552.515625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 584.515625,
+        "right": 295
+      },
+      "noteOnTop": true,
+      "label": "320x640"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 389.40625,
+        "bottom": 492.40625,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 492.40625,
+        "width": 731,
+        "height": 195.796875,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 502.40625,
+        "width": 705,
+        "height": 112,
+        "bottom": 614.40625,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 622.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 661.40625,
+        "width": 554.0625,
+        "height": 16.796875,
+        "bottom": 678.203125,
+        "right": 829.0625
+      },
+      "send": {
+        "x": 889.625,
+        "y": 622.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "long-question"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 465.40625,
+        "bottom": 568.40625,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 568.40625,
+        "width": 731,
+        "height": 119.796875,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 578.40625,
+        "width": 705,
+        "height": 36,
+        "bottom": 614.40625,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 622.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 661.40625,
+        "width": 554.0625,
+        "height": 16.796875,
+        "bottom": 678.203125,
+        "right": 829.0625
+      },
+      "send": {
+        "x": 889.625,
+        "y": 622.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "source-off"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 465.40625,
+        "bottom": 568.40625,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 568.40625,
+        "width": 731,
+        "height": 119.796875,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 578.40625,
+        "width": 705,
+        "height": 36,
+        "bottom": 614.40625,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 622.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 661.40625,
+        "width": 554.0625,
+        "height": 16.796875,
+        "bottom": 678.203125,
+        "right": 829.0625
+      },
+      "send": {
+        "x": 889.625,
+        "y": 622.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "source-on"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 465.40625,
+        "bottom": 568.40625,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 568.40625,
+        "width": 731,
+        "height": 119.796875,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 578.40625,
+        "width": 705,
+        "height": 36,
+        "bottom": 614.40625,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 622.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 661.40625,
+        "width": 554.0625,
+        "height": 16.796875,
+        "bottom": 678.203125,
+        "right": 829.0625
+      },
+      "send": {
+        "x": 889.625,
+        "y": 622.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "source-default"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 362.6875,
+        "bottom": 465.6875,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 465.6875,
+        "width": 731,
+        "height": 222.515625,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 475.6875,
+        "width": 705,
+        "height": 36,
+        "bottom": 511.6875,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 519.6875,
+        "width": 215,
+        "height": 32,
+        "bottom": 551.6875,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 558.6875,
+        "width": 705,
+        "height": 16.796875,
+        "bottom": 575.484375,
+        "right": 980
+      },
+      "send": {
+        "x": 889.625,
+        "y": 519.6875,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 551.6875,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "public-search-open"
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "header": {
+        "x": 262,
+        "y": 60,
+        "width": 994,
+        "height": 31,
+        "bottom": 91,
+        "right": 1256
+      },
+      "messages": {
+        "x": 262,
+        "y": 103,
+        "width": 731,
+        "height": 465.40625,
+        "bottom": 568.40625,
+        "right": 993
+      },
+      "composer": {
+        "x": 262,
+        "y": 568.40625,
+        "width": 731,
+        "height": 119.796875,
+        "bottom": 688.203125,
+        "right": 993
+      },
+      "question": {
+        "x": 275,
+        "y": 578.40625,
+        "width": 705,
+        "height": 36,
+        "bottom": 614.40625,
+        "right": 980
+      },
+      "source": {
+        "x": 355.015625,
+        "y": 622.40625,
+        "width": 215,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 570.015625
+      },
+      "note": {
+        "x": 275,
+        "y": 661.40625,
+        "width": 554.0625,
+        "height": 16.796875,
+        "bottom": 678.203125,
+        "right": 829.0625
+      },
+      "send": {
+        "x": 889.625,
+        "y": 622.40625,
+        "width": 90.375,
+        "height": 32,
+        "bottom": 654.40625,
+        "right": 980
+      },
+      "noteOnTop": true,
+      "label": "long-case-title"
+    }
+  ],
+  "synthetic": true
+}

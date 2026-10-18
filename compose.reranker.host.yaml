@@ -1,0 +1,7 @@
+# Optional override for a Python/uvicorn LexCite instance on the host.
+# Start only reranker with compose.reranker.yaml + this file.
+# Bind to loopback; do not expose this unauthenticated service to the LAN.
+services:
+  reranker:
+    ports:
+      - "127.0.0.1:8081:8081"

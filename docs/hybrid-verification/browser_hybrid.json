@@ -1,0 +1,17 @@
+{
+  "browser": "153.0.8010.0",
+  "checks": [
+    "unconfigured-semantic-search-is-visible",
+    "ollama-and-aliyun-endpoints-separated",
+    "independent-secrets-saved-without-echo",
+    "both-service-tests-operational",
+    "background-index-progress-and-ready-count",
+    "answer-displays-actual-hybrid-and-rerank-models",
+    "semantic-hit-retains-full-original-citation",
+    "export-persists-retrieval-provenance",
+    "changed-model-ignores-old-vectors-and-shows-failure",
+    "mobile-failure-visible-no-overflow",
+    "no-javascript-errors"
+  ],
+  "synthetic": true
+}

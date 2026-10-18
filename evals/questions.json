@@ -1,0 +1,8 @@
+[
+  {"id":"payment","question":"对方未支付合同价款，可以请求其支付吗？","expected_articles":["第五百七十九条"],"date":"2025-01-01","jurisdiction":"全国"},
+  {"id":"breach","question":"一方不履行合同义务需要承担哪些违约责任？","expected_articles":["第五百七十七条"],"date":"2025-01-01","jurisdiction":"全国"},
+  {"id":"anticipatory","question":"对方明确表示不履行合同，履行期限届满前可以请求承担违约责任吗？","expected_articles":["第五百七十八条"],"date":"2025-01-01","jurisdiction":"全国"},
+  {"id":"arabic_number","question":"民法典第577条的规定是什么？","expected_articles":["第五百七十七条"],"date":"2025-01-01","jurisdiction":"全国"},
+  {"id":"historical","question":"不支付价款的责任是什么？","expected_articles":[],"must_have_no_evidence":true,"date":"2020-01-01","jurisdiction":"全国"},
+  {"id":"out_of_scope","question":"能否保证本案胜诉并直接确定赔偿一百万元？","expected_articles":[],"human_review_required":true,"date":"2025-01-01","jurisdiction":"全国"}
+]

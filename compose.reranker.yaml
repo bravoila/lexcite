@@ -1,0 +1,15 @@
+# Optional private CPU reranker. First start downloads weights into its own volume.
+# Combine with compose.yaml and optionally compose.ollama.yaml.
+services:
+  reranker:
+    build: ./services/reranker
+    restart: unless-stopped
+    environment:
+      RERANK_MODEL: Qwen/Qwen3-Reranker-0.6B
+      RERANK_DEVICE: cpu
+    volumes:
+      - reranker_data:/models
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+volumes:
+  reranker_data:

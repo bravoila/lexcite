@@ -1,0 +1,15 @@
+# Optional CPU/local Ollama service. Model files persist in a separate volume.
+# Start: docker compose -f compose.yaml -f compose.ollama.yaml up -d --build
+# Pull:  docker compose -f compose.yaml -f compose.ollama.yaml exec ollama ollama pull qwen3:8b
+# In the GUI select Ollama, use http://ollama:11434/v1 and qwen3:8b.
+services:
+  ollama:
+    image: ollama/ollama:0.33.3
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    # Kept on the Compose network. Do not expose an unauthenticated Ollama port.
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "32768"
+volumes:
+  ollama_data:

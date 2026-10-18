@@ -1,0 +1,40 @@
+"""Real HTTP protocol test with a deterministic stub, not a real LLM evaluation."""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import threading
+from app import llm
+
+
+def test_full_http_model_roundtrip(client,corpus):
+    captured=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args):
+            pass
+        def do_POST(self):
+            assert self.path == "/v1/chat/completions"
+            body=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            captured.append(body)
+            payload=json.loads(body["messages"][1]["content"])
+            if "draft" in payload:
+                content={"checks":[{"claim_index":i,"supported":True,"reason":"HTTP fixture only"} for i in range(len(payload["draft"]))]}
+            elif "candidate_evidence" in payload:
+                content={"selected_ids":[x["id"] for x in payload["candidate_evidence"]],"coverage":"sufficient","reason":"HTTP fixture only"}
+            elif "evidence" in payload:
+                a=next(x for x in payload["evidence"] if x["number"]=="第五百七十九条")
+                content={"insufficient":False,"claims":[{"text":"在未支付价款的情形下，对方可以请求支付。","kind":"rule","evidence":[{"article_id":a["id"],"quote":a["body"]}]}],"missing_facts":[]}
+            else:
+                content={"queries":["未支付价款 请求支付"]}
+            data=json.dumps({"choices":[{"finish_reason":"stop","message":{"content":json.dumps(content,ensure_ascii=False)}}]}).encode()
+            self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
+    server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    try:
+        llm.save_settings({"provider":"custom","base_url":f"http://127.0.0.1:{server.server_port}/v1","model":"mock-only","api_key":""})
+        cid=client.post("/api/cases",json={"title":"HTTP test","event_date":"2025-01-01"}).json()["id"]
+        response=client.post(f"/api/cases/{cid}/ask",json={"text":"对方未支付合同价款可以请求其支付吗？"})
+        assert response.status_code==200,response.text
+        result=response.json()
+        assert result["status"]=="answered" and len(captured)==4
+        assert result["citations"][0]["number"]=="第五百七十九条"
+    finally:
+        server.shutdown();server.server_close();thread.join(timeout=2)
