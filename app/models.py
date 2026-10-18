@@ -1,8 +1,30 @@
 import datetime as dt
+import ipaddress
+import socket
 from typing import Literal
 from urllib.parse import urlsplit
 from pydantic import BaseModel, Field, field_validator, model_validator
 from .sources import official_url
+
+# Hosts an operator may legitimately point model/embedding/rerank services at
+# on the deployment machine; numeric loopback stays blocked so an untrusted
+# save cannot probe the host or reach metadata endpoints.
+ALLOWED_LOCAL_ENDPOINT_HOSTS = ("localhost", "host.docker.internal", "ollama")
+
+
+def _resolved_ips(host, port):
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    try:
+        return [ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)]
+    except socket.gaierror:
+        # Unresolvable at save time: the endpoint cannot be operator-verified, so
+        # saving is allowed but the residual DNS-rebinding window is documented
+        # as a known boundary (PRD §13).
+        return []
 
 
 class CaseInput(BaseModel):
@@ -92,9 +114,16 @@ class SettingsInput(BaseModel):
     def endpoint(cls, value):
         u = urlsplit(value)
         if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password or u.query or u.fragment:
-            raise ValueError("模型地址格式不正确；使用服务的 /v1 或兼容端点")
-        if u.hostname == "169.254.169.254" or u.hostname in ("metadata.google.internal",):
-            raise ValueError("不允许云实例元数据地址")
+            raise ValueError("服务地址格式不正确；使用服务的 /v1 或兼容端点")
+        host = u.hostname
+        if host not in ALLOWED_LOCAL_ENDPOINT_HOSTS:
+            if host in ("169.254.169.254", "metadata.google.internal"):
+                raise ValueError("不允许云实例元数据地址")
+            for ip in _resolved_ips(host, u.port):
+                if ip.version == 6 and ip.ipv4_mapped:
+                    ip = ip.ipv4_mapped
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                    raise ValueError("不允许内网、回环或保留地址；本地模型请使用 localhost、host.docker.internal 或 ollama 服务名")
         return value.rstrip("/")
 
 

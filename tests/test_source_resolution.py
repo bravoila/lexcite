@@ -2,6 +2,7 @@
 
 Full-law bodies below are deliberately synthetic; no legal accuracy score.
 """
+import datetime as dt
 import time
 import pytest
 from app import db, ingest, llm, sources, websearch
@@ -83,6 +84,22 @@ def test_criminal_old_date_does_not_read_newer_text(client,monkeypatch):
     monkeypatch.setattr(sources,'read_official',lambda *a,**k:pytest.fail('no newer law fetch'))
     col=collector();assert not col.acquire([{'name':'刑法'}],'2020-01-01','全国',lambda *a:None)
     assert col.leads[-1]['state']=='version_not_covered'
+
+
+def test_stale_local_version_does_not_block_online_supplement(client,monkeypatch):
+    monkeypatch.setattr(sources,'read_official',lambda url,**kw:mock_page(url,**kw))
+    monkeypatch.setattr(websearch,'search',lambda *a:pytest.fail('catalog lookup must not require search'))
+    law={'name':'中华人民共和国刑法','version':'本地测试版','jurisdiction':'全国','kind':'法律',
+         'source_kind':'paste','valid_from':'2021-01-01','text':'第一条 本地测试条文正文。'}
+    lid=client.post('/api/laws',json=law).json()['id']
+    events=[]
+    col=collector();rows=col.acquire([{'name':'刑法'}],'2026-09-25','全国',lambda *a:events.append(a))
+    assert len(rows)==453  # 未复核的本地同名版本不阻断,线上版本照常纳入临时证据
+    assert any(e[0]=='source_read' and '未阻断' in e[1] for e in events)
+    with db.connect() as c:
+        c.execute("UPDATE laws SET reviewed_at=? WHERE id=?",(dt.date.today().isoformat()+'T00:00:00Z',lid))
+    col2=collector();assert not col2.acquire([{'name':'刑法'}],'2026-09-25','全国',lambda *a:None)
+    assert any('人工复核版本' in lead['note'] for lead in col2.leads)
 
 
 @pytest.mark.parametrize('kind,expected',[('none','search_not_configured'),('search','search_limit'),('read','read_limit'),('time','time_limit')])

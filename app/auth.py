@@ -33,7 +33,8 @@ def init():
         if not code_file.exists():
             code_file.write_text(secrets.token_urlsafe(24))
             code_file.chmod(0o600)
-        print("法据首次初始化码（仅用于创建管理员密码）: " + code_file.read_text(), flush=True)
+        # Never echo the code itself: containers and CI logs are often shared.
+        print("法据尚未初始化：初始化码已写入 data/setup-code.txt（仅部署管理员可读），请访问页面完成管理员密码设置。", flush=True)
 
 
 def setup(password, code):

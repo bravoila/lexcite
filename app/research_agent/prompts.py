@@ -23,6 +23,8 @@ VERIFY = GUARD + """
 rule只能陈述法律规则，inference只能基于用户问题或已确认事实作有条件分析。缺少事实时的确定性结论判false。
 对每个claims下标输出且仅输出一次checks：claim_index从0开始，supported布尔值，reason简短理由。有疑问就false。
 结论还须直接回应本问题或一个明确子问题；与争点无关的真实规则也判false。资料不全时允许有依据的部分规则和条件分析，但不得把一般规则冒充缺失的专项规定，不得把推荐补充资料当作已取得的法源。
+未通过的结论另给action：现有原文足以通过条件化、缩小结论或删除无依据断言来修正时为rewrite；确实需要取得新的条文才能支持该结论时为retrieve。仅缺事实不能靠重新检索解决，应为rewrite。通过的结论action为rewrite。
+verified_claims是同一组证据下已核验的结论，仅用于检查新改写是否与其矛盾，不是事实或法源；本次只对draft中的结论返回checks。
 """
 
 CONTEXT_RULES = """
@@ -38,6 +40,16 @@ PLAN += CONTEXT_RULES
 DRAFT += CONTEXT_RULES
 
 VERIFY += CONTEXT_RULES
+
+REPAIR = GUARD + CONTEXT_RULES + """
+仅修正failed_claims列出的结论，不重写整份分析，不输出其他结论，不改变已通过的结论。
+逐项返回patches，每项claim_index必须与输入一致且仅出现一次；claim为修正后的完整结论，无法用现有evidence支持时为null，表示删除。不得新建下标或遗漏下标。
+invalid_citation只允许修正evidence中的article_id和quote，不得改变text、kind或section；如文字本身也无法成立则删除，不要借修引文改变结论。
+unsupported_claim须按reason缩小或条件化结论，保留用户原话中的否定、未知、主体、时间和例外；不能修正则删除。
+仅使用evidence中的完整法条，quote必须为逐字连续原文；不得补写其他法规、金额、比例、期限或链接。rule仅概括原文，inference只能基于用户实际提供事实作条件分析。
+缺失的法源不在evidence中，不得凭常识补齐，不得为了通过复核强行保留结论。每项结论仍须包含一到五条直接支持它的证据。
+如仍缺少必要案件事实，可在missing_facts中提出最多三个尚未回答的新问题；不要再次询问已提供或明确未知的信息。
+"""
 
 CLARIFY = GUARD + CONTEXT_RULES + """
 核对待追问列表questions是否已由用户回答。sources只包含用户原话或手工确认事实，不包含助手回答。

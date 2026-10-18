@@ -20,14 +20,25 @@ def uid():
 def data_dir():
     p = Path(os.getenv("LEXCITE_DATA", str(ROOT / "data")))
     p.mkdir(parents=True, exist_ok=True)
+    # Cases, memories and the encrypted API key live here; keep the directory
+    # readable only by the service account.
+    try:
+        os.chmod(p, 0o700)
+    except OSError:
+        pass
     return p
 
 
 @contextlib.contextmanager
 def connect():
-    c = sqlite3.connect(data_dir() / "lexcite.sqlite3", timeout=30)
+    path = data_dir() / "lexcite.sqlite3"
+    c = sqlite3.connect(path, timeout=30)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys=ON")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     try:
         yield c
         c.commit()
@@ -41,6 +52,13 @@ def connect():
 def init():
     with connect() as c:
         c.execute("PRAGMA journal_mode=WAL")
+        # WAL/SHM sidecars are created lazily on first write; tighten them once
+        # journal_mode materializes the files.
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.chmod(data_dir() / f"lexcite.sqlite3{suffix}", 0o600)
+            except OSError:
+                pass
         c.executescript('''
         CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,expires REAL NOT NULL);

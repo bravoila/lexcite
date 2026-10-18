@@ -2,6 +2,7 @@ import datetime as dt
 import hashlib
 import io
 import re
+import zlib
 from bisect import bisect_right
 from html.parser import HTMLParser
 import httpx
@@ -11,6 +12,9 @@ NUM = r"[零〇一二三四五六七八九十百千万两0-9]+"
 HSPACE = r"[^\S\r\n]"
 ARTICLE = re.compile(r"(?m)^" + HSPACE + r"*(第" + HSPACE + r"*" + NUM + HSPACE + r"*条(?:之[一二三四五六七八九十0-9]+)?)" + HSPACE + r"*")
 COMMENTARY = re.compile(r"(?m)^" + HSPACE + r"*(关于《[^》\n]{2,100}》的说明|起草说明|草案说明|修订说明|立法说明)" + HSPACE + r"*$")
+# A standalone structural heading line (编/章/节/部分 + optional title). Inline
+# phrases like '第二章规定的' do not match: the heading requires the whole line.
+STRUCTURAL_HEADING = re.compile(r"(?m)^" + HSPACE + r"*第" + NUM + r"(?:部分|编|章|节)(?:" + HSPACE + r"+[^\n。；;]+|" + HSPACE + r"*)" + HSPACE + r"*$")
 
 
 def normalize(text):
@@ -72,8 +76,16 @@ def analyze_articles(text):
             text = text[:note.start()]
             break
     matches = []
-    for match in ARTICLE.finditer(text):
-        reason = _reference_reason(text, match)
+    found = [(m, _reference_reason(text, m)) for m in ARTICLE.finditer(text)]
+    # A real heading sequence is numbered consecutively; a reference list is not.
+    # When the next line-start article number continues the sequence, prefer the
+    # heading interpretation even if the preceding line ends in a citation lead-in.
+    for i, (match, reason) in enumerate(found):
+        if reason and i + 1 < len(found):
+            cur = article_key(match[1])
+            nxt = article_key(found[i + 1][0][1])
+            if nxt == (cur[0] + 1, 0) or nxt == (cur[0], cur[1] + 1):
+                reason = None
         if reason:
             references.append({"line": line_no(match.start()), "number": normalize(match[1]), "reason": reason})
         else:
@@ -86,8 +98,9 @@ def analyze_articles(text):
         key = article_key(number)
         body = text[match.end(): matches[i+1].start() if i+1 < len(matches) else len(text)].strip()
         # Only standalone structural headings end the previous article; a wrapped
-        # reference such as '第二章规定的...' is kept verbatim.
-        body = re.split(r"\n" + HSPACE + r"*第" + NUM + r"[编章节](?:" + HSPACE + r"+[^\n。；;]+|" + HSPACE + r"*)\n", body+"\n", maxsplit=1)[0].strip()
+        # reference such as '第二章规定的...' is kept verbatim. Strip every heading
+        # line, not just the first: an article can close a section and a chapter at once.
+        body = STRUCTURAL_HEADING.sub("", body + "\n").strip()
         if key in seen:
             previous = seen[key]
             snippet = text[match.start():match.start()+100].strip().replace("\n", " ")
@@ -117,6 +130,18 @@ def import_law(law):
     lid = db.uid()
     digest = hashlib.sha256(law.text.encode()).hexdigest()
     with db.connect() as c:
+        # A duplicate is a lookup result, not an error: return the existing record
+        # so the caller can open it instead of colliding with the UNIQUE constraint.
+        # Identity dedup on (name, version, jurisdiction) — the UNIQUE constraint's
+        # own key. Same text under a different version/name remains a legitimate
+        # separate import (e.g. version-overlap review), so no sha256 fallback here.
+        same = c.execute("SELECT * FROM laws WHERE name=? AND version=? AND jurisdiction=?",
+                         (law.name, law.version, law.jurisdiction)).fetchone()
+        if same:
+            count = c.execute("SELECT COUNT(*) FROM articles WHERE law_id=?", (same["id"],)).fetchone()[0]
+            return {"id": same["id"], "duplicate": True, "name": same["name"], "version": same["version"],
+                    "count": count, "sha256": same["sha256"],
+                    "message": f"已存在法规《{same['name']}》{same['version']}（{same['jurisdiction']}），未重复导入，返回已有记录。"}
         c.execute("""INSERT INTO laws
             (id,name,version,jurisdiction,kind,source_url,valid_from,valid_to,reviewed_at,sha256,created,source_kind,source_name,canonical_name,document_number)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
@@ -126,6 +151,9 @@ def import_law(law):
         rows = [(db.uid(), lid, a["number"], a["body"], a["ordinal"]) for a in articles]
         c.executemany("INSERT INTO articles VALUES (?,?,?,?,?)", rows)
         indexing.mark_headings(c, [(r[0],r[2],r[3]) for r in rows], law.text)
+        # Compressed snapshot of the exact submitted text: the citation card's
+        # SHA-256 becomes recomputable from what is stored.
+        c.execute("INSERT INTO law_snapshots VALUES (?,?)", (lid, zlib.compress(law.text.encode())))
     db.audit("law_import", {"law_id": lid, "sha256": digest, "count": len(articles)})
     return {"id": lid, "count": len(articles), "sha256": digest}
 
@@ -135,10 +163,17 @@ def extract_file(name, content):
     if ext in ("txt", "md"):
         for enc in ("utf-8-sig", "gb18030"):
             try:
-                return content.decode(enc)
+                text = content.decode(enc)
+                break
             except UnicodeDecodeError:
                 pass
-        raise ValueError("文本编码无法识别，请转为 UTF-8")
+        else:
+            raise ValueError("文本编码无法识别，请转为 UTF-8")
+        if ext == "md":
+            # Markdown markers at line start are not statutory text; strip them so
+            # headings and lists split exactly like the plain-text original.
+            text = re.sub(r"(?m)^[ \t]*(?:#{1,6}|[*+-])[ \t]*", "", text)
+        return text
     if ext == "pdf":
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(content))
@@ -146,7 +181,13 @@ def extract_file(name, content):
             raise ValueError("请先解除 PDF 密码保护")
         if len(reader.pages) > 1500:
             raise ValueError("PDF超过1500页，请按法规拆分")
-        text = "\n".join(p.extract_text() or "" for p in reader.pages)
+        pages = [p.extract_text() or "" for p in reader.pages]
+        # A mostly-blank PDF is a scan: reject explicitly instead of importing a
+        # few OCR'd pages and silently dropping the rest.
+        empty = sum(1 for page in pages if len(normalize(page)) < 5)
+        if empty and empty / len(pages) > 0.5:
+            raise ValueError(f"此 PDF 有 {empty}/{len(pages)} 页无可读文字（扫描件特征），请先用 OCR 软件转为文字型 PDF 或 TXT")
+        text = "\n".join(pages)
         if len(normalize(text)) < 30:
             raise ValueError("此 PDF 没有可读取文字，请先用 OCR 软件转为文字型 PDF 或 TXT")
         return text
@@ -156,8 +197,24 @@ def extract_file(name, content):
             if sum(i.file_size for i in z.infolist()) > 50_000_000:
                 raise ValueError("DOCX解压后过大")
         from docx import Document
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
         doc = Document(io.BytesIO(content))
-        return "\n".join(p.text for p in doc.paragraphs)
+        parts = []
+        for child in doc.element.body.iterchildren():
+            # Keep document order; paragraphs alone would silently drop tables.
+            if child.tag.endswith("}p"):
+                parts.append(Paragraph(child, doc).text)
+            elif child.tag.endswith("}tbl"):
+                for row in Table(child, doc).rows:
+                    for cell in row.cells:
+                        parts.extend(p.text for p in cell.paragraphs)
+        # Headers/footers rarely carry provisions but are part of the original;
+        # merge them so no text is silently dropped.
+        for section in doc.sections:
+            for container in (section.header, section.footer):
+                parts.extend(p.text for p in container.paragraphs)
+        return "\n".join(parts)
     raise ValueError("支持 TXT、Markdown、文字型 PDF 和 DOCX")
 
 

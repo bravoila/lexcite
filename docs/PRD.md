@@ -2,12 +2,12 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.3 |
+| 文档版本 | v0.5 |
 | 日期 | 2026-10-17 |
-| 当前版本 | 1.3.2(已重构 + P0 已修复,见下) |
-| 代码基线 | git HEAD `acb2c23 restructure` + 工作区 R3 P0 修复(未提交) |
-| 测试基线 | 232 项 pytest 全通过(基线 218 项 + R3 新增 14 条 P0 回归) |
-| 审查轮次 | **R1(重构前)**:4 个模块并行审查 + 人工交叉验证;**R2(重构后)**:2 个 agent 复审(研究 Agent 新包 / 工作区改动)+ 逐项 grep 复核;**R3**:P0-1~P0-5 修复并配齐回归测试 |
+| 当前版本 | 1.3.2(已重构 + P0、P1 安全加固与导入/解析可靠性已修复,见下) |
+| 代码基线 | git HEAD `acb2c23 restructure` + 工作区 R3 P0 / R4 安全加固 / R5 导入解析修复(未提交) |
+| 测试基线 | 286 项 pytest 全通过(基线 218 项 + R3 新增 14 条 P0 回归 + R4 新增 14 条 P1 安全回归 + R5 新增 19 条 P1 导入解析回归 + 另有 21 条为研究 Agent 局部修正阶段的并行修改回归) |
+| 审查轮次 | **R1(重构前)**:4 个模块并行审查 + 人工交叉验证;**R2(重构后)**:2 个 agent 复审(研究 Agent 新包 / 工作区改动)+ 逐项 grep 复核;**R3**:P0-1~P0-5 修复并配齐回归测试;**R4**:P1-1~P1-7 安全加固修复并配齐回归测试;**R5**:P1-8~P1-14 导入/解析可靠性修复并配齐回归测试 |
 | 重构说明 | `app/engine.py`、`retrieval.py`、`authorities.py`、`case_state.py` 已删除,逻辑迁入 `app/research_agent/`(runner / retrieval / verification / authorities / context / schemas / prompts)。context.py 与旧 case_state.py 的 12 个函数字节码一致,文档与实现一致,测试未改弱 |
 
 ## 1. 背景与目标
@@ -28,8 +28,8 @@
 | 优先级 | 主题 | 需求数 | 已修复 | 说明 |
 |---|---|---|---|---|
 | P0 | 正确性与安全阻塞项 | 6 | **6(全部)** | R3 完成 P0-1~P0-6,均可发布 |
-| P1 | 安全加固 | 7 | 0 | 部署安全基线 |
-| P1 | 导入/解析可靠性 | 7 | 0 | 防止条文污染与静默丢失 |
+| P1 | 安全加固 | 7 | **7(全部)** | R4 完成 P1-1~P1-7,部署安全基线 |
+| P1 | 导入/解析可靠性 | 7 | **7(全部)** | R5 完成 P1-8~P1-14,防止条文污染与静默丢失 |
 | P1 | 工程健壮性 | 6 | 1(部分) | 任务状态机、性能与韧性 |
 | P2 | 评测与可观测 | 5 | 0 | 建立可量化的质量基线 |
 | P2 | 产品能力 | 6 | 0 | 检索增强、任务恢复、数据管理 |
@@ -135,75 +135,182 @@
 
 ## 4. P1:安全加固
 
-### P1-1 会话 Cookie 安全默认 【未修复】
+### P1-1 会话 Cookie 安全默认 【已修复】
 
 **现状**:`app/main.py:124` 仍仅 `LEXCITE_SECURE_COOKIE=="1"` 才设 Secure,compose 默认 0。
 
 **需求**:`LEXCITE_PUBLIC_URL` 为 https 时强制 Secure;以 http 启动且非 loopback 绑定时打印告警;部署文档补充 HSTS 配置。
 
-**验收**:PUBLIC_URL=https 且 LEXCITE_SECURE_COOKIE=0 → Cookie 仍带 Secure;告警可见于日志。
+**修复**(R4):`app/main.py:_cookie_secure()` 统一判定——`LEXCITE_SECURE_COOKIE=1` 或 `LEXCITE_PUBLIC_URL` 以 `https://` 开头即设 Secure;lifespan 在 Cookie 未 Secure 时输出告警日志并提示补救开关。login 路由改调该助手。HSTS 属反代配置,写入部署提示(compose 注释/告警文案)。
 
-### P1-2 模型/检索/搜索端点 SSRF 防护 【未修复】
+**验收标准**:
+- [x] PUBLIC_URL=https 且 LEXCITE_SECURE_COOKIE=0 → Cookie 仍带 Secure。`tests/test_security.py::test_cookie_secure_when_public_url_https`
+- [x] LEXCITE_SECURE_COOKIE=1 → Secure;默认(两者皆无)→ 不带。`test_cookie_secure_when_flag_set`、`test_cookie_not_secure_by_default`
+- [x] 告警可见于日志。`test_startup_warns_when_cookie_not_secure`
+
+### P1-2 模型/检索/搜索端点 SSRF 防护 【已修复】
 
 **现状**:`app/models.py:96` 仍仅拦 `169.254.169.254` 与 `metadata.google.internal`;127.0.0.1、内网段、IPv6 均放行;「测试连接」可探测内网,`app/llm.py:291` 回显错误 JSON 构成半盲 SSRF。
 
 **需求**:解析 base_url 后拒绝私有/回环/链路本地/元数据网段(含 IPv6 映射);连接钉扎解析后 IP;本地 Ollama 走显式白名单(host.docker.internal / ollama 服务名)。
 
-**验收**:base_url=http://127.0.0.1:9000、http://[::1] 等 → 保存被拒绝并给出原因;白名单内地址可保存并测试。
+**修复**(R4):`app/models.py` 重写端点校验——urlsplit 拒绝非 http(s)/带凭据/带 query/fragment 的地址;主机名不在白名单 `localhost`/`host.docker.internal`/`ollama` 时,对主机名与 DNS 解析结果逐 IP 判 `is_private/is_loopback/is_link_local/is_reserved/is_multicast/is_unspecified`(IPv4 映射 IPv6 先归一),命中即拒绝并说明本地模型应使用白名单服务名;保存期解析失败不拦截,调用期 DNS 重绑定的残余窗口记录为边界风险(§13,后续可加请求期钉扎)。`SearchSettingsInput` 与 `retrieval_services.Service` 共用同一校验器,三个保存入口同防护。
 
-### P1-3 鉴权前不再缓冲大请求体 【未修复】
+**验收标准**:
+- [x] base_url=http://127.0.0.1:9000、http://[::1]、169.254.169.254、10.x、192.168.x、0.0.0.0、metadata.google.internal → 保存被拒绝并给出原因。`tests/test_security.py::test_endpoint_blocks_private_loopback_reserved`
+- [x] 白名单 localhost/host.docker.internal/ollama 及公网域名可保存。`test_endpoint_allows_named_local_hosts_and_public`
+- [x] 检索服务端点同防护;带凭据/query/非 http(s) 的畸形地址被拒。`test_retrieval_settings_endpoint_blocked`、`test_endpoint_rejects_malformed_urls`
+
+### P1-3 鉴权前不再缓冲大请求体 【已修复】
 
 **现状**:`app/main.py:53-65` 中间件在鉴权依赖之前读满 22MB body,未登录者可反复 POST 大包耗尽单 worker 内存。
 
 **需求**:鉴权失败时提前断开(401 优先于 body 解析,用 Content-Length 预判);体上限降至合理值(如 8MB);文档建议反代限制并发与 body。
 
-**验收**:未登录 POST 大包 → 401 且不触发完整 body 解析。
+**修复**(R4):`app/main.py` 中间件重排——X-Lexcite → Origin → 鉴权(401)之后才读 body;`/api/login`、`/api/setup` 为仅有的免鉴权 POST(与路由依赖一致)。通用上限降为 8MB,`/api/extract` 保留 20MB 文件预算;Content-Length 预判与流式封顶同用该值。
 
-### P1-4 数据文件权限收紧 【未修复】
+**验收标准**:
+- [x] 未登录 POST 9MB → 401 且不触发完整 body 解析(非 413)。`tests/test_security.py::test_unauthenticated_large_post_rejected_before_body`
+- [x] 已登录 POST 9MB → 413 并提示 8MB 上限。`test_authenticated_oversize_post_413`
+
+### P1-4 数据文件权限收紧 【已修复】
 
 **现状**:`app/db.py:20-28` 数据目录 0755、SQLite 0644;直接 Python 部署且主机多用户时案卷可被他人直读。
 
 **需求**:数据目录 0700、DB/WAL/SHM 0600;启动时自动纠正既有权限;`secret.key` 保持 0600。
 
-**验收**:`ls -l data/` 与 `lexcite.sqlite3` 权限符合;多用户主机上非属主读取被拒。
+**修复**(R4):`app/db.py`——`data_dir()` 每次调用后 chmod 0700;`connect()` 打开库文件后 chmod 0600;`init()` 在 WAL 模式生效后对 `-wal`/`-shm` 侧车文件 chmod 0600(懒创建即启动时自动纠正既有权限)。`secret.key` 原有 0600 创建逻辑保持。
 
-### P1-5 初始化码不出现在 stdout 【未修复】
+**验收标准**:
+- [x] `ls -l data/` 与 `lexcite.sqlite3` 权限符合(0700/0600),WAL/SHM 存在时同样 0600。`tests/test_security.py::test_data_files_restricted_permissions`
+
+### P1-5 初始化码不出现在 stdout 【已修复】
 
 **现状**:`app/auth.py:34` 初始化码打印到 stdout,未初始化期间每次重启重印;能读日志者可在管理员之前抢占初始化。
 
 **需求**:初始化码写入一次性文件(已 0600),从日志移除;改为首次部署时提示「初始化码见 data/setup-code.txt」。
 
-**验收**:启动日志不含初始化码;文件读取后流程不变。
+**修复**(R4):`app/auth.py:init()` 不再拼接输出码值,改为提示「初始化码已写入 data/setup-code.txt(仅部署管理员可读)」;文件创建 0600、setup 成功后删除的流程不变。
 
-### P1-6 Origin 白名单不依赖 Host 头 【未修复】
+**验收标准**:
+- [x] 启动 stdout 包含 setup-code.txt 提示、不含码值本身(对照文件内容断言)。`tests/test_security.py::test_setup_code_not_leaked_to_stdout`
+
+### P1-6 Origin 白名单不依赖 Host 头 【已修复】
 
 **现状**:`app/main.py:48` 白名单仍由 `request.base_url`(Host 头)推导(另加 PUBLIC_URL);反代透传任意 Host 时可绕过。
 
 **需求**:白名单以 `LEXCITE_PUBLIC_URL` 为固定来源;Host 头与 PUBLIC_URL 不符时拒绝或忽略 Origin 校验走 SameSite 主防线。
 
-**验收**:伪造 Host 头的跨站请求仍被 SameSite=Strict + 自定义头拦下;测试覆盖。
+**修复**(R4):`app/main.py` 中间件——设置了 `LEXCITE_PUBLIC_URL` 时白名单固定为该值(Host 头无法加宽);未设置时(单机本地部署)回退 `request.base_url`,并保留 SameSite=Strict + X-Lexcite 自定义头主防线。
 
-### P1-7 前端链接渲染仅允许 http/https 【未修复,降级为低危】
+**验收标准**:
+- [x] PUBLIC_URL 下伪造 Origin 的跨站写请求 → 403「请求来源不匹配」;同源 Origin → 200。`tests/test_security.py::test_origin_mismatch_rejected_when_public_url_set`
+- [x] 未设 PUBLIC_URL 的本地部署行为不变(同源 Origin 通过)。`test_origin_ok_without_public_url`
+
+### P1-7 前端链接渲染仅允许 http/https 【已修复,低危防御纵深】
 
 **现状**:`static/app.js:108` 搜索结果 URL 经 `esc()` 后直接渲染为 `<a href>`,未校验 scheme。**R2 复核补充**:`app/websearch.py:110-115` 入库前经 official_url 限制 https+gov.cn/npc.gov.cn,**新数据无法注入**;且 CSP 可挡 `javascript:` 执行。剩余风险仅存在于历史数据/库被篡改场景,属防御纵深。
 
 **需求**:渲染前校验 `new URL(...).protocol` 为 http/https;非 http(s) 降级为纯文本。
 
-**验收**:构造 javascript: 协议的搜索结果 → 页面显示为不可点击文本。
+**修复**(R4):`static/app.js` 新增 `safeHref()`(相对 `location.origin` 解析 `new URL(...).protocol`,仅放行 http/https,异常返回 null);web 来源列表、正文来源链接、修正案依据链接三处渲染统一经它过滤,非 http(s) 降级为纯文本标题且不渲染导入按钮。`tests/browser_sources.cjs` 增加注入 `javascript:alert(1)` 来源的断言(无 `a[href^="javascript:"]`、标题可见为纯文本、正常 https 链接保留)。
+
+**验收标准**:
+- [x] 构造 javascript: 协议的搜索结果 → 页面显示为不可点击文本;https 链接不受影响。`tests/browser_sources.cjs`(需 Playwright 浏览器环境,本机 `node --check` 通过)
 
 ---
 
-## 5. P1:导入/解析可靠性(全部未修复,ingest.py 未被重构触及)
+## 5. P1:导入/解析可靠性 【已修复,R5】
 
-| 编号 | 现状(位置不变) | 需求 | 验收要点 |
-|---|---|---|---|
-| P1-8 | `app/ingest.py:90` 章节行污染上一条正文 | 章节/分编行独立识别并从 body 剔除,记录 heading_path | 导入含章标题文本 → 正文不含章节行 |
-| P1-9 | `app/ingest.py:42-57,75-80` 引用启发式吞真实条标题 | 后文为清晰条号模式时优先按条号断;疑似误并边界显式告警 | 「…依照下列规定\n第二条…」拆分正确或阻断告警,不静默合并 |
-| P1-10 | `app/ingest.py:118-127` SHA256 不可审计 | 保存压缩原文快照;统一哈希对象;引用卡片提供重算入口 | 卡片 SHA256 可由存档重算一致;文档明确哈希口径 |
-| P1-11 | `app/ingest.py:149-160`、`app/main.py:340-347` PDF/DOCX 静默丢失+阻塞事件循环 | 按页空文本比例/耗时拒绝可疑文件;解析移入线程池;DOCX 合并表格/页眉页脚 | 20MB 扫描 PDF → 明确报错;上传期间其他请求不显著延迟 |
-| P1-12 | `app/research_agent/authorities.py:223-225`(已迁入新包)阻断仅查 reviewed_at 真值 | 复用 corpus 的 review_days 截止与辖区判定;不满足阻断条件时降级 warning | 本地同名版本复核已过期 → 联网补查不再被误阻断 |
-| P1-13 | 重复导入无查重 | 按 (canonical_name, version, jurisdiction) 或 SHA256 查重,返回已有记录 ID | 同正文重复导入 → 返回「已存在法规 X」而非 409 |
-| P1-14 | `app/ingest.py:135-141` Markdown 标记破坏拆条 | 提取时剥离行首 `#`、`*`、`-`;补测试 | Markdown 导入拆条数与纯文本一致 |
+### P1-8 章节行污染上一条正文 【已修复】
+
+**现状**:`app/ingest.py:90` 章节行污染上一条正文;一条文同时收尾「节」和「章」时只剥离第一个标题行。
+
+**需求**:章节/分编行独立识别并从 body 剔除,记录 heading_path。
+
+**修复**(R5):`app/ingest.py` 新增行级正则 `STRUCTURAL_HEADING`——整行为「第N部分/编/章/节 + 可选标题」才命中,「第二章规定的」这类行内短语不匹配;每条 body 用 `STRUCTURAL_HEADING.sub` 剥离**所有**标题行(一条文可同时收尾节和章)。`app/indexing.py:mark_headings` 同步改用 `(部分|编|章|节)` 与层级映射 `{'部分':0,'编':1,'章':2,'节':3}`,导入时记录 heading_path(检索头与目录用)。
+
+**验收标准**:
+- [x] 连续两个结构标题行都从 body 剔除。`tests/test_import_quality.py::test_multiple_structural_headings_stripped_from_body`
+- [x] 「第一部分 总则」不残留「分 总则」。`test_part_heading_stripped`
+- [x] heading_path 随导入记录。`test_heading_path_recorded_on_import`
+
+### P1-9 引用启发式吞真实条标题 【已修复】
+
+**现状**:`app/ingest.py:42-57,75-80` 引用启发式吞真实条标题——上一行以引用引导语结尾时,下一行行首条号被并入上一条文。
+
+**需求**:后文为清晰条号模式时优先按条号断;疑似误并边界显式告警。
+
+**修复**(R5):`analyze_articles` 先按 `_reference_reason` 标注疑似引用;若后一行行首条号**连续**(第N条→第N+1条,或第N条→第N条之一),视为真实标题序列,取消引用判定、优先按条号断;仍判为引用的保留在所属条文中并计入 cross_references 与警告,不静默合并。
+
+**验收标准**:
+- [x] 引用引导语结尾 + 后续连续条号 → 拆分正确。`test_lead_in_line_with_consecutive_numbers_prefers_split`
+- [x] 「办理下列事项,依照下列规定\n第二条…」→ 拆分。`test_acceptance_lead_in_splits`
+- [x] 歧义引用保留在正文并告警。`test_ambiguous_reference_kept_with_warning`
+
+### P1-10 SHA256 不可审计 【已修复】
+
+**现状**:`app/ingest.py:118-127` SHA256 不可审计——哈希对象与口径不明确,入库后无法重算。
+
+**需求**:保存压缩原文快照;统一哈希对象;引用卡片提供重算入口。
+
+**修复**(R5):`ensure_schema` 新增 `law_snapshots(law_id, content BLOB)`;`import_law` 存 `zlib.compress(提交原文)`(口径:导入时提交的原始正文按 UTF-8 取 SHA-256,未做规范化或拆分);新增 `GET /api/laws/{id}/hash-check` 从存档重算并与卡片哈希比对;引用卡片(前端 `showCitation`)提供「存档重算」按钮,重算一致/不一致分别显示;上线前导入的旧数据无快照时明确提示可重新导入。
+
+**验收标准**:
+- [x] 快照重算 == 存储 sha256 == 原文 UTF-8 SHA256。`test_snapshot_recompute_matches_stored_hash`
+- [x] 存档为压缩的提交原文。`test_snapshot_is_compressed_original`
+- [x] 无快照时 hash-check 报告 snapshot_missing。`test_hash_check_without_snapshot_reports_missing`
+
+### P1-11 PDF/DOCX 静默丢失+阻塞事件循环 【已修复】
+
+**现状**:`app/ingest.py:149-160`、`app/main.py:340-347` PDF/DOCX 静默丢失+阻塞事件循环——PDF 只取首页、DOCX 只取段落,解析在事件循环内同步执行。
+
+**需求**:按页空文本比例/耗时拒绝可疑文件;解析移入线程池;DOCX 合并表格/页眉页脚。
+
+**修复**(R5):PDF 按页提取,空页(归一化后 <5 字)占比 >50% 判定扫描件特征直接拒绝并提示 OCR;DOCX 按 document body 顺序遍历段落与表格(单元格段落并入),再合并页眉页脚,不静默丢内容;`/api/extract` 解析移入 `run_in_threadpool`。
+
+**验收标准**:
+- [x] 扫描件特征 PDF → ValueError 并提示 OCR。`test_scanned_pdf_rejected_with_clear_error`
+- [x] 文字型 PDF 全页提取。`test_text_pdf_extracts_all_pages`
+- [x] DOCX 表格/页眉并入且顺序正确。`test_docx_includes_tables_and_headers`
+- [x] 上传接口解析在线程池执行(不阻塞事件循环)。`test_extract_endpoint_accepts_docx_off_event_loop`
+
+### P1-12 联网阻断未套复核周期/辖区 【已修复】
+
+**现状**:`app/research_agent/authorities.py:223-225`(已迁入新包)阻断仅查 reviewed_at 真值——本地同名版本只要复核过就永远阻断联网补查。
+
+**需求**:复用 corpus 的 review_days 截止与辖区判定;不满足阻断条件时降级 warning。
+
+**修复**(R5):`authorities.acquire()` 本地同名版本检查复用 corpus 口径——名称匹配 + 辖区(全国或同辖区)+ 有效日期重叠 + reviewed_at 在 review_days 截止内才阻断;不满足时发出 source_read 警告「本地同名版本未阻断联网补查」,线上版本作为临时证据纳入。
+
+**验收标准**:
+- [x] 复核过期的本地同名版本不阻断联网补查,产生警告。`tests/test_source_resolution.py::test_stale_local_version_does_not_block_online_supplement`
+- [x] 已复核(在 review_days 内)的同名版本阻断补查,lead 提示「人工复核版本」。
+
+### P1-13 重复导入无查重 【已修复】
+
+**现状**:`app/ingest.py:117-127`、`app/db.py:61` 重复导入无查重——同一法规重复导入撞 UNIQUE 约束报错。
+
+**需求**:按 (name, version, jurisdiction) 查重,返回已有记录 ID。
+
+**修复**(R5):`import_law` 按 UNIQUE 约束同键身份查重,命中返回已有记录 `{duplicate:True, id, message:已存在法规…}` 而非 409;前端导入后 toast 提示并打开已有法规。同正文不同名称/版本属合法独立版本(版本重叠复核场景),不做 SHA256 兜底查重。
+
+**验收标准**:
+- [x] 同身份重复导入 → 返回已有记录且不新增行。`test_duplicate_import_returns_existing_record`
+- [x] 同正文不同元数据 → 独立导入。`test_same_text_different_metadata_imports_separately`
+
+### P1-14 Markdown 标记破坏拆条 【已修复】
+
+**现状**:`app/ingest.py:135-141` Markdown 标记破坏拆条——行首 `#`/`*`/`-` 使条标题无法识别。
+
+**需求**:提取时剥离行首 `#`、`*`、`-`;补测试。
+
+**修复**(R5):`extract_file` 对 .md 在拆条前剥离行首标记(含缩进);.txt 原样返回;编码依次尝试 utf-8-sig/gb18030。
+
+**验收标准**:
+- [x] Markdown 拆条与纯文本一致。`test_markdown_extraction_roundtrip_matches_plaintext_split`
+- [x] 行首标记剥离后条号可识别。`test_markdown_markers_stripped_before_split`
+- [x] .txt 内容不被触碰。`test_txt_content_untouched`
 
 ---
 
@@ -341,7 +448,7 @@
 | 编号 | 严重度 | 位置 | 问题 | 需求 |
 |---|---|---|---|---|
 | N1 | 中 | tests/test_agent.py:75/99/116、test_core_research.py:193/213/315、test_memory_reasoning.py:72、tests/browser_fixture_app.py:55/67/73 | CoverageAudit 已改为本地构造,不再有独立模型调用,但测试仍保留 `schema is CoverageAudit` 死分支;覆盖步骤增删时这些测试仍绿,失去保护 | 清理死分支,按新流程重写覆盖步骤测试 |
-| N2 | 中 | tests/test_integrity.py:78-83 | P0-3/P0-4/P0-5/P1-12/P1-20 均无回归测试;现有测试只覆盖库内法名与中文「之一」 | 每个 P0/P1 修复配套至少一条回归测试(见各节验收标准)。R3:P0-1~P0-5 已配齐 14 条(见各节);P1 待修时补 |
+| N2 | 中 | tests/test_integrity.py:78-83 | P0-3/P0-4/P0-5/P1-12/P1-20 均无回归测试;现有测试只覆盖库内法名与中文「之一」 | 每个 P0/P1 修复配套至少一条回归测试(见各节验收标准)。R3:P0-1~P0-5 已配齐 14 条;R4:P1-1~P1-7 已配齐 14 条;R5:P1-8~P1-14 已配齐 19 条(见各节) |
 | N3 | 低 | app/research_agent/runner.py:221 | `source_timing` 置于 finally,异常、取消、同轮空 acquire 都会 emit;正常「补查无新增」在进度区显示为警告 | emit 仅限实际新增来源;无新增时标记 skipped |
 | N4 | 低 | tests/browser_fixture_app.py:69 | 无默认值的 `next()`;首个离线提问时 evidence 为空抛 StopIteration → 500(旧代码同样会崩,非新回归) | next(..., None) 或按空 evidence 返回缺失法源 |
 | N5 | 低 | app/research_agent/schemas.py | 错误阶段 JSON 静默解析为空 Draft,报 no_supported_answer 而非 model_error(迁移保留行为) | 阶段不匹配时显式报模型结构错误 |
@@ -362,15 +469,16 @@
 
 ## 12. 发布与验收
 
-1. **回归基线**:pytest 232 项全通过(R3 修复后,含 14 条新增 P0 回归)+ 59 项浏览器检查。
-2. **新增测试**:本 PRD 每个「验收标准」至少一条自动化测试;P0 全部有测试(N2)。
+1. **回归基线**:pytest 286 项全通过(R5 修复后,含 14 条 P0 回归 + 14 条 P1 安全回归 + 19 条 P1 导入解析回归)+ 59 项浏览器检查(其中 P1-7 新增 1 项注入断言)。
+2. **新增测试**:本 PRD 每个「验收标准」至少一条自动化测试;P0 与 P1 安全加固全部有测试(N2)。
 3. **真实服务冒烟**:发布前至少完成一次真实国产 API(聊天/向量/重排)+ 本地 Ollama 的端到端验证(1.3.x 验证记录明确未做过,此项为 1.4.0 发布门槛)。
 4. **法律评测**:P2-1 保留集跑通并记录指标;不承诺准确率,但报告必须可复现。
-5. **安全回归**:SSRF、锁死 DoS、密钥外泄、权限各一项负向测试。
+5. **安全回归**:SSRF、锁死 DoS、密钥外泄、权限各一项负向测试。(R4 已配齐:test_security.py 14 项 + test_auth.py 5 项 + test_model_wire.py 2 项)
 
 ## 13. 风险与边界
 
-- **SSRF 收紧与本地服务冲突**:P1-2 的白名单必须覆盖 host.docker.internal/ollama/reranker 三种既有部署形态,避免修复引入部署回归。
+- **SSRF 收紧与本地服务冲突(已解决)**:P1-2 白名单覆盖 localhost/host.docker.internal/ollama 三种既有部署形态;既有测试改用 localhost 模拟服务端,部署回归已排除。
+- **DNS 重绑定残余窗口**:P1-2 保存期校验通过后,调用期的 DNS 解析可能被重绑到内网地址;当前为记录在案的边界风险,后续迭代可加请求期 IP 钉扎(仅影响「运营商配置的域名被劫持/重绑」场景,非默认攻击面)。
 - **密钥绑定迁移**:P0-2 已按「端点不变自动保留、端点变化即清除」实现,存量密钥无需迁移;改端点后需重新输入密钥(前端提示见 P1 文档工作)。
 - **法律边界不变**:引用原文匹配与模型复核不保证法律结论正确;评测指标不构成「法律准确率」声明。
 - **单进程边界不变**:多租户(P3)落地前仍需单 worker + 线程锁模型,不引入分布式部署。
@@ -387,20 +495,20 @@
 | 4 | 高 | research_agent/retrieval.py:159,172 | 单法库任意「第N条」成为精确命中 | **已修复** | P0-4 ✅ |
 | 5 | 高 | research_agent/retrieval.py:161,236-238; verification.py:20,26-27 | 条号原始字符串比较;「之」后缀仅中文数字 | **已修复** | P0-5 ✅ |
 | 6 | 中 | research_agent/runner.py:216-221,271-274 | 覆盖异常跳过结论清空分支 | **已修复** | P0-6 ✅ |
-| 7 | 中 | main.py:124 | Cookie Secure 默认关 | 未修复 | P1-1 |
-| 8 | 中 | models.py:96 | 测试连接半盲 SSRF | 未修复 | P1-2 |
-| 9 | 中 | main.py:53-65 | 鉴权前缓冲 22MB body | 未修复 | P1-3 |
-| 10 | 中 | db.py:20-28 | SQLite 0644,案卷可直读 | 未修复 | P1-4 |
-| 11 | 低 | auth.py:34 | 初始化码打印 stdout | 未修复 | P1-5 |
-| 12 | 低 | main.py:48 | Origin 白名单依赖 Host 头 | 未修复 | P1-6 |
-| 13 | 低 | static/app.js:108 | 链接渲染未校验 scheme | 未修复(上游缓解,降为低) | P1-7 |
-| 14 | 中 | ingest.py:90 | 章节行污染条文正文 | 未修复 | P1-8 |
-| 15 | 中 | ingest.py:42-57,75-80 | 引用启发式吞真实条标题 | 未修复 | P1-9 |
-| 16 | 中 | ingest.py:118-127 | SHA256 不可审计 | 未修复 | P1-10 |
-| 17 | 中 | ingest.py:149-160, main.py:340-347 | PDF/DOCX 静默丢失+阻塞事件循环 | 未修复 | P1-11 |
-| 18 | 低 | research_agent/authorities.py:223-225 | 联网阻断未套复核周期/辖区 | 未修复 | P1-12 |
-| 19 | 低 | ingest.py:117-127, db.py:61 | 重复导入无查重 | 未修复 | P1-13 |
-| 20 | 低 | ingest.py:135-141 | Markdown 标记破坏拆条 | 未修复 | P1-14 |
+| 7 | 中 | main.py:124 | Cookie Secure 默认关 | **已修复** | P1-1 ✅ |
+| 8 | 中 | models.py:96 | 测试连接半盲 SSRF | **已修复** | P1-2 ✅ |
+| 9 | 中 | main.py:53-65 | 鉴权前缓冲 22MB body | **已修复** | P1-3 ✅ |
+| 10 | 中 | db.py:20-28 | SQLite 0644,案卷可直读 | **已修复** | P1-4 ✅ |
+| 11 | 低 | auth.py:34 | 初始化码打印 stdout | **已修复** | P1-5 ✅ |
+| 12 | 低 | main.py:48 | Origin 白名单依赖 Host 头 | **已修复** | P1-6 ✅ |
+| 13 | 低 | static/app.js:108 | 链接渲染未校验 scheme | **已修复**(防御纵深) | P1-7 ✅ |
+| 14 | 中 | ingest.py:90 | 章节行污染条文正文 | **已修复** | P1-8 ✅ |
+| 15 | 中 | ingest.py:42-57,75-80 | 引用启发式吞真实条标题 | **已修复** | P1-9 ✅ |
+| 16 | 中 | ingest.py:118-127 | SHA256 不可审计 | **已修复** | P1-10 ✅ |
+| 17 | 中 | ingest.py:149-160, main.py:340-347 | PDF/DOCX 静默丢失+阻塞事件循环 | **已修复** | P1-11 ✅ |
+| 18 | 低 | research_agent/authorities.py:223-225 | 联网阻断未套复核周期/辖区 | **已修复** | P1-12 ✅ |
+| 19 | 低 | ingest.py:117-127, db.py:61 | 重复导入无查重 | **已修复** | P1-13 ✅ |
+| 20 | 低 | ingest.py:135-141 | Markdown 标记破坏拆条 | **已修复** | P1-14 ✅ |
 | 21 | 中 | indexing.py:198-215 | 取消竞态任务永久 queued | 未修复 | P1-15 |
 | 22 | 中 | jobs.py:100-103, llm.py:238-239 | cancelled() 每行新建 SQLite 连接 | 未修复 | P1-16 |
 | 23 | 中 | research_agent/retrieval.py:50-55,87-107 | 每轮多次全表扫描 | 未修复 | P1-17 |

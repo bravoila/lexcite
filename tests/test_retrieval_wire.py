@@ -22,7 +22,9 @@ def wire():
                 data={'output':{'results':items}} if '/services/' in self.path else {'results':items}
             body=json.dumps(data).encode();self.send_response(reply.get('status',200));self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-    yield f'http://127.0.0.1:{server.server_port}',calls,reply
+    # The loopback numeric address is blocked by the SSRF endpoint validator; the
+    # mock really lives on this machine, so use the whitelisted localhost name.
+    yield f'http://localhost:{server.server_port}',calls,reply
     server.shutdown();server.server_close();thread.join(2)
 
 

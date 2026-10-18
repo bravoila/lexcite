@@ -221,8 +221,19 @@ class ResearchSources:
                     if rows[0]['jurisdiction'] not in ('全国',jurisdiction):raise ValueError('法源地区与本案地区不匹配')
                     if rows[0]['valid_from']>event_date:raise ValueError('法源在研究基准日期尚未施行；请核对研究日期与版本')
                     with db.connect() as c:local=[dict(r) for r in c.execute('SELECT * FROM laws')]
-                    if any(retrieval.matches_law(l,rows[0]['name']) and l['reviewed_at'] and l['valid_from']<=event_date and (not l['valid_to'] or event_date<l['valid_to']) for l in local):
-                        raise ValueError('已有日期重叠的人工复核版本，线上版本未自动替换；请核对版本后更新资料库')
+                    # Only a currently-active reviewed local version blocks the
+                    # online supplement — the same cutoff and jurisdiction rules
+                    # retrieval.corpus applies. A stale or unreviewed overlapping
+                    # version degrades to a warning instead of blocking.
+                    cutoff = (dt.date.today() - dt.timedelta(days=llm.settings()['review_days'])).isoformat()
+                    for l in local:
+                        if not (retrieval.matches_law(l, rows[0]['name']) and l['jurisdiction'] in ('全国', jurisdiction)
+                                and l['valid_from'] <= event_date and (not l['valid_to'] or event_date < l['valid_to'])):
+                            continue
+                        if l['reviewed_at'] and l['reviewed_at'][:10] >= cutoff:
+                            raise ValueError('已有日期重叠的人工复核版本，线上版本未自动替换；请核对版本后更新资料库')
+                        emit('source_read', '本地同名版本未阻断联网补查',
+                             f"本地《{l['name']}》{l['version']} 与线上版本同日有效，但尚未复核或复核已过期，未阻断本次补查；线上版本作为临时证据纳入，请复核本地版本。", 'warning')
                     added.extend(rows);self.rows.extend(rows);success=True
                     self.leads.append(lead|{'requested_name':need['name'],'url':page['source_url'],'state':'temporary_evidence','fetched_at':rows[0]['fetched_at'],'article_count':len(rows),'sha256':rows[0]['sha256'],'version_basis':rows[0].get('version_basis'),
                                            'note':'已通过来源、元信息和条号连续性检查，可供本次条件分析；未人工复核，不自动写入正式法库。','previews':[{'number':r['number'],'body':r['body'][:1200]} for r in rows[:2]]})

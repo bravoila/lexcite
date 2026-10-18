@@ -1,7 +1,7 @@
 import json
 from app import db, llm
 from app.research_agent import runner as engine
-from app.research_agent.schemas import CoverageAudit, FactExtraction, Draft, Plan, Verdict
+from app.research_agent.schemas import CoverageAudit, FactExtraction, Draft, Plan, Repair, Verdict
 
 
 def new_case(c,title="合同纠纷"):
@@ -68,6 +68,7 @@ def test_unsupported_or_unavailable_verification_blocks(client,corpus,monkeypatc
         if schema is Draft:
             a=payload["evidence"][0]
             return Draft(insufficient=False,claims=[{"text":"对方一定要赔偿十万元。","kind":"inference","evidence":[{"article_id":a["id"],"quote":a["body"]}]}])
+        if schema is Repair:return Repair(patches=[{"claim_index":0,"claim":None}])
         return Verdict(checks=[{"claim_index":0,"supported":False,"reason":"金额没有依据"}])
     monkeypatch.setattr(llm,"request_json",fake)
     result=client.post(f"/api/cases/{cid}/ask",json={"text":"未支付价款怎么处理"}).json()

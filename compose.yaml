@@ -6,6 +6,9 @@ services:
       - "${LEXCITE_BIND:-127.0.0.1}:${LEXCITE_PORT:-8080}:8080"
     environment:
       LEXCITE_ADMIN_PASSWORD: ${LEXCITE_ADMIN_PASSWORD:-}
+      # Set LEXCITE_PUBLIC_URL to the public https address behind a reverse proxy
+      # (cookie becomes Secure automatically; configure HSTS in the proxy itself).
+      # LEXCITE_SECURE_COOKIE=1 forces Secure even without PUBLIC_URL.
       LEXCITE_SECURE_COOKIE: ${LEXCITE_SECURE_COOKIE:-0}
       LEXCITE_PUBLIC_URL: ${LEXCITE_PUBLIC_URL:-}
       # Set to 1 only when a reverse proxy sits in front and it appends/overwrites

@@ -8,11 +8,13 @@ import os
 import re
 import sqlite3
 import threading
+import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from . import auth, db, ingest, llm, sources, jobs, websearch, indexing, retrieval_services
 from .research_agent import retrieval, context as case_state
@@ -31,6 +33,8 @@ async def lifespan(app):
     jobs.init()
     auth.init()
     llm.cipher()
+    if not _cookie_secure() and not os.getenv("LEXCITE_SECURE_COOKIE"):
+        logger.warning("会话 Cookie 未启用 Secure；公网部署请设置 LEXCITE_PUBLIC_URL=https://… 或 LEXCITE_SECURE_COOKIE=1，并仅通过 HTTPS 访问")
     retrieval_services.init()
     indexing.init()
     yield
@@ -45,23 +49,32 @@ async def protection(request: Request, call_next):
     if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
         if request.headers.get("X-Lexcite") != "1":
             return JSONResponse({"detail": "缺少请求校验标记"}, status_code=403)
+        public_url = os.getenv("LEXCITE_PUBLIC_URL", "").rstrip("/")
+        # With LEXCITE_PUBLIC_URL set it is the fixed whitelist source and the
+        # Host header cannot widen it; without it, single-host local deployments
+        # fall back to the request origin. SameSite=Strict remains the main line.
+        allowed = {public_url} if public_url else {str(request.base_url).rstrip("/")}
         origin = request.headers.get("origin")
-        allowed = {str(request.base_url).rstrip("/")}
-        if os.getenv("LEXCITE_PUBLIC_URL"):
-            allowed.add(os.environ["LEXCITE_PUBLIC_URL"].rstrip("/"))
         if origin and origin.rstrip("/") not in allowed:
             return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
+        # Reject unauthenticated writes before reading the body, so an anonymous
+        # client cannot make the single worker buffer a large payload.
+        if request.url.path not in ("/api/login", "/api/setup") and not auth.authenticated(request):
+            return JSONResponse({"detail": "请先登录"}, status_code=401)
         try:
             content_length = int(request.headers.get("content-length", "0"))
         except ValueError:
             return JSONResponse({"detail": "无效请求长度"}, status_code=400)
-        if content_length > 22_000_000:
-            return JSONResponse({"detail": "文件过大，最大20MB"}, status_code=413)
+        # File extraction keeps the 20MB upload budget; everything else is capped
+        # at 8MB (the largest pasted law text is ~6MB).
+        cap = 22_000_000 if request.url.path == "/api/extract" else 8_000_000
+        if content_length > cap:
+            return JSONResponse({"detail": "文件过大，最大20MB" if cap > 10_000_000 else "请求内容过大，最大8MB"}, status_code=413)
         # Enforce the same bound for chunked uploads before JSON/multipart parsing.
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > 22_000_000:
+            if len(body) > cap:
                 return JSONResponse({"detail": "请求内容超过限制"}, status_code=413)
         request._body = bytes(body)
     response = await call_next(request)
@@ -118,6 +131,12 @@ def setup(value: LoginInput):
     return {"ok": True}
 
 
+def _cookie_secure():
+    # Session cookie is Secure whenever the operator explicitly opts in or the
+    # deployment is exposed on https; HTTP-only is meaningless over plain http.
+    return os.getenv("LEXCITE_SECURE_COOKIE") == "1" or os.getenv("LEXCITE_PUBLIC_URL", "").startswith("https://")
+
+
 def client_address(request):
     # Only honor X-Forwarded-For when the deployment opts in (LEXCITE_TRUST_PROXY=1,
     # i.e. a known reverse proxy sits in front). Use the last hop, the address the
@@ -135,7 +154,7 @@ def client_address(request):
 def login(value: LoginInput, request: Request):
     token = auth.login(value.password, client_address(request))
     response = JSONResponse({"ok": True})
-    response.set_cookie("lexcite_session", token, httponly=True, samesite="strict", secure=os.getenv("LEXCITE_SECURE_COOKIE") == "1", max_age=28800)
+    response.set_cookie("lexcite_session", token, httponly=True, samesite="strict", secure=_cookie_secure(), max_age=28800)
     return response
 
 
@@ -355,6 +374,24 @@ def law_detail(lid: str):
         return {"law": dict(row), "articles": [dict(r) for r in c.execute("SELECT * FROM articles WHERE law_id=? ORDER BY ordinal", (lid,))]}
 
 
+@app.get("/api/laws/{lid}/hash-check", dependencies=[Depends(auth.require)])
+def hash_check(lid: str):
+    # Recompute the citation card's SHA-256 from the archived original text, so
+    # the stored digest is auditable instead of being an opaque claim.
+    with db.connect() as c:
+        row = c.execute("SELECT * FROM laws WHERE id=?", (lid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "法规不存在")
+        snapshot = c.execute("SELECT content FROM law_snapshots WHERE law_id=?", (lid,)).fetchone()
+        if not snapshot:
+            return {"ok": False, "snapshot_missing": True, "sha256": row["sha256"],
+                    "note": "该版本导入于原文存档功能上线前，无原始快照可重算；可删除后重新导入以生成存档。"}
+        recomputed = hashlib.sha256(zlib.decompress(snapshot["content"])).hexdigest()
+        return {"ok": recomputed == row["sha256"], "snapshot_missing": False,
+                "sha256": row["sha256"], "recomputed": recomputed,
+                "note": "口径：导入时提交的原始正文（未做规范化或拆分）按 UTF-8 编码取 SHA-256。"}
+
+
 @app.post("/api/laws/preview", dependencies=[Depends(auth.require)])
 def preview(value: LawPreviewInput):
     return ingest.analyze_articles(value.text)
@@ -374,7 +411,9 @@ async def extract(file: UploadFile = File(...)):
     if len(content) > 20_000_000:
         raise HTTPException(413, "文件最大20MB")
     try:
-        text = ingest.extract_file(file.filename or "", content)
+        # PDF/DOCX parsing is CPU-bound; keep it off the event loop so uploads
+        # cannot stall other requests on the single worker.
+        text = await run_in_threadpool(ingest.extract_file, file.filename or "", content)
         if not text.strip():
             raise ValueError("未从文件中提取到正文，请使用文字型文件或先完成 OCR")
         if len(text) > sources.MAX_TEXT_CHARS:

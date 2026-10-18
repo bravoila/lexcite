@@ -71,10 +71,19 @@ class Plan(BaseModel):
     questions: list[str] = Field(default_factory=list, max_length=6)
     authorities: list[AuthorityNeed] = Field(default_factory=list, max_length=6)
 
+class ClaimPatch(BaseModel):
+    claim_index: int = Field(ge=0, le=7)
+    claim: Claim | None
+
+class Repair(BaseModel):
+    patches: list[ClaimPatch] = Field(max_length=8)
+    missing_facts: list[str] = Field(default_factory=list, max_length=3)
+
 class Check(BaseModel):
     claim_index: int
     supported: bool
     reason: str = Field(max_length=400)
+    action: Literal["rewrite", "retrieve"] = "rewrite"
 
 class Verdict(BaseModel):
     checks: list[Check]

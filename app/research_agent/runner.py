@@ -5,8 +5,8 @@ import time
 from .. import db, llm, websearch
 from ..ingest import article_key
 from . import retrieval, authorities, context as case_state
-from .prompts import PLAN, DRAFT, VERIFY, CLARIFY, FACTS
-from .schemas import Draft, Plan, Verdict, ClarificationAudit, FactExtraction, CoverageAudit, SourceMetadata
+from .prompts import PLAN, DRAFT, REPAIR, VERIFY, CLARIFY, FACTS
+from .schemas import Draft, Plan, Repair, Verdict, ClarificationAudit, FactExtraction, CoverageAudit, SourceMetadata
 from .verification import validate_claim
 
 
@@ -35,6 +35,13 @@ def split_questions(items):
         if re.search(r'evidence|法源|法律依据|司法解释.*(?:缺|未提供)|(?:缺少|未提供|未检索).*(?:法条|法规|依据)',item,re.I):legal.append(item)
         else:facts.append(item)
     return facts,legal
+
+
+def evidence_key(rows):
+    ranking_fields={'retrieval_score','retrieval_channels','rerank_score','expanded'}
+    return json.dumps(sorted(
+        ({k:v for k,v in row.items() if k not in ranking_fields} for row in rows),
+        key=lambda row:row['id']),ensure_ascii=False,sort_keys=True)
 
 
 def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_query='', online_research=None):
@@ -70,7 +77,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         check()
         if result['model_calls']>=18:raise BudgetExceeded('达到18次模型调用上限')
         result['model_calls']+=1
-        item={'call':result['model_calls'],'stage':{Plan:'研究计划',Draft:'法律分析',Verdict:'证据复核',ClarificationAudit:'追问核对',FactExtraction:'理解案件信息',CoverageAudit:'检查法源覆盖',SourceMetadata:'核对官方文件'}.get(schema,'模型调用'),
+        item={'call':result['model_calls'],'stage':{Plan:'研究计划',Draft:'法律分析',Repair:'局部修正',Verdict:'证据复核',ClarificationAudit:'追问核对',FactExtraction:'理解案件信息',CoverageAudit:'检查法源覆盖',SourceMetadata:'核对官方文件'}.get(schema,'模型调用'),
               'round':result['rounds'],'model':s['verify_model'] if verify and s['verify_model'] else s['model'],'text':'','status':'running','truncated':False}
         run={'call':item['call'],'stage':item['stage'],'round':item['round'],'model':item['model'],'status':'running',
              'payload_characters':len(json.dumps(payload,ensure_ascii=False)),'elapsed_seconds':0,'usage':None}
@@ -176,10 +183,9 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         result['elapsed_seconds']=round(time.monotonic()-started,2)
         return result
 
-    def save_claims(valid,approved,rows):
+    def save_claims(approved,rows):
         refs,claims={},[]
-        for i,claim in enumerate(valid):
-            if i not in approved:continue
+        for claim in approved:
             labels=[]
             for ref in claim.evidence:
                 if ref.article_id not in refs:refs[ref.article_id]=next(r for r in rows if r['id']==ref.article_id)|{'label':len(refs)+1,'quotes':[]}
@@ -233,106 +239,174 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
                 if exc.fatal:return finish()
         needs=authorities.directory_for(state['research_focus']) if use_model else []
         needs=[n for n in needs if not authorities.entry_for(n['name']) or authorities.entry_for(n['name'])['effective_from']<=case['event_date']]
-        feedback,previous,last_ids,manual_web=[],None,None,False
+        feedback,previous,last_key,manual_web=[],None,None,False
+        draft,working,approved=None,{},set()
+        action,attempted='analyze',set()
+
+        def stop(detail):
+            warnings.append(detail)
+            emit('repair','停止无进展的重复研究',detail,'warning')
+
+        def attempt(kind):
+            key=(kind,last_key)
+            if key in attempted:
+                stop('同一组证据已尝试'+{'repair':'局部修正','retrieve':'补充检索','review':'重试复核','retry_draft':'重试分析'}[kind]+'，不再重复；仅保留已通过核验的结论，未解决部分仍需补证或人工核对。')
+                return False
+            attempted.add(key)
+            return True
+
         with db.connect() as c:
             library_names=[n for r in c.execute("SELECT name,canonical_name FROM laws") for n in r if n]
         for number in range(1,(s['agent_rounds'] if use_model else 1)+1):
-            check();result['rounds']=number;focus=state['research_focus'];plan=None
+            check();focus=state['research_focus'];plan=None
+            if number>1 and not attempt(action):break
+            result['rounds']=number
             fact_query=focus+'\n'+'；'.join(x['text'] for x in state['facts'])[:900] if state['facts'] else focus
             queries=list(dict.fromkeys([focus,fact_query,question]+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]))[:9]
-            if use_model and number>1:
-                emit('repair','制定修正方案','上一轮引用或支持性检查未通过，按具体反馈修正；不因推荐文件尚缺而重复完整研究。')
+            if action=='retrieve':
+                emit('repair','制定补充检索方案','复核指出需要新法源，仅为缺证结论制定检索方案；没有新证据不重写整份分析。')
                 try:
-                    plan=call(PLAN,context|{'repair_feedback':feedback,'source_gaps':result['source_gaps'],'authority_directory':needs,'previous_observation':{'candidate_ids':last_ids,'coverage':result['coverage']}},Plan)
+                    plan=call(PLAN,context|{'repair_feedback':feedback,'source_gaps':result['source_gaps'],'authority_directory':needs,'previous_observation':{'candidate_ids':[r['id'] for r in evidence],'coverage':result['coverage']}},Plan)
                     needs=unique_needs(needs+plan.authorities)
                     queries=list(dict.fromkeys([focus,fact_query]+[q[:400] for q in plan.queries if q.strip()]+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]))[:9]
-                    result['missing_facts']=questions(plan.questions)
+                    result['missing_facts']=questions(result['missing_facts']+plan.questions)
                     emit('plan','检索计划就绪','；'.join(queries)[:900],'completed')
                 except llm.ModelError as exc:
-                    warnings.append(str(exc));emit('plan','保留原研究问题检索',str(exc),'warning')
-            retrieve(queries,needs)
-            if any(e['fatal'] for e in result['model_errors']):return finish()
-            if not manual_web and web_query.strip():
-                manual_web=True
-                try:
-                    emit('web','联网搜索用户提供的公开词',web_query)
-                    leads=websearch.search(web_query,check,max(.1,deadline-time.monotonic()))
-                    result['web_sources']=leads
-                    for i,lead in enumerate(leads[:2]):
-                        check()
-                        if deadline-time.monotonic()<36:break
-                        result['web_sources'][i]=websearch.read_lead(lead)
-                except websearch.SearchError as exc:warnings.append(str(exc))
-            if not use_model:
-                if not web_query.strip():emit('web','本次未联网','原文模式仅检索本地资料；公开检索词留空。','skipped')
-                return finish()
-            update_gaps(needs)
-            if acquire():
-                retrieve(queries,needs);update_gaps(needs)
-            if any(e['fatal'] for e in result['model_errors']):return finish()
-            ids=tuple(sorted(r['id'] for r in evidence))
-            if result['claims'] and ids!=last_ids:
-                result['claims']=[];result['citations']=[]
-                result.pop('verification',None)
-            if number>1 and ids==last_ids and (not evidence or plan and plan.action=='clarify'):
-                emit('clarifications','停止无新增依据的重复分析','检索证据未新增，保留已核对的部分和必要事实问题。','warning')
-                break
-            draft=None
-            for source_pass in range(2):
-                draft=None
-                payload=context|{'evidence':evidence,'source_gaps':result['source_gaps'],'analysis_scope':result['analysis_scope'],'repair_feedback':feedback,'previous_attempt':previous}
-                emit('draft','分析规则与个案条件','一次检查相关性与覆盖，先回答现有原文支持的部分，同时列出推荐资料。')
-                try:draft=call(DRAFT,payload,Draft)
-                except llm.ModelError as exc:
-                    warnings.append(str(exc));feedback=[{'type':'model_error','reason':str(exc)}]
+                    warnings.append(str(exc));emit('plan','补充检索计划未完成',str(exc),'warning')
                     if exc.fatal:return finish()
                     break
-                previous=draft.model_dump();result['missing_facts']=questions(draft.missing_facts)
-                needs=unique_needs(needs+draft.missing_authorities);update_gaps(needs,draft.missing_authorities)
-                if source_pass==0 and acquire():
+                if plan.action=='clarify':
+                    update_gaps(needs)
+                    stop('现有问题需要补充事实而非重复检索；保留已核验的部分和必要事实问题。')
+                    break
+            if number==1 or action=='retrieve':
+                retrieve(queries,needs)
+                if not manual_web and web_query.strip():
+                    manual_web=True
+                    try:
+                        emit('web','联网搜索用户提供的公开词',web_query)
+                        leads=websearch.search(web_query,check,max(.1,deadline-time.monotonic()))
+                        result['web_sources']=leads
+                        for i,lead in enumerate(leads[:2]):
+                            check()
+                            if deadline-time.monotonic()<36:break
+                            result['web_sources'][i]=websearch.read_lead(lead)
+                    except websearch.SearchError as exc:warnings.append(str(exc))
+                if not use_model:
+                    if not web_query.strip():emit('web','本次未联网','原文模式仅检索本地资料；公开检索词留空。','skipped')
+                    return finish()
+                update_gaps(needs)
+                if acquire():
+                    retrieve(queries,needs);update_gaps(needs)
+                if any(e['fatal'] for e in result['model_errors']):return finish()
+                current_key=(evidence_key(evidence),evidence_key(collector.rows))
+                if action=='retrieve' and current_key==last_key:
+                    emit('repair','补充检索没有新增依据','条文内容、版本与适用信息均未变化，不重新生成整份分析。','warning')
+                    if not any(f['type']=='invalid_citation' or f['type']=='unsupported_claim' and f['action']=='rewrite' for f in feedback):
+                        stop('补充检索未取得新依据；缺证结论不再重复生成，仍需补充法源或人工核对。')
+                        break
+                    action='repair'
+                else:
+                    action='analyze';last_key=current_key
+                    approved=set();working={}
+                    result['claims']=[];result['citations']=[]
+                    result.pop('verification',None)
+            if action=='repair':
+                if plan is not None and not attempt('repair'):break
+                targets={f['claim_index'] for f in feedback if f['type']=='invalid_citation' or f['type']=='unsupported_claim' and f['action']=='rewrite'}
+                failures=[f|{'claim':working[f['claim_index']].model_dump()} for f in feedback if f.get('claim_index') in targets]
+                emit('repair','局部修正未通过的结论',f'仅处理 {len(targets)} 项失败结论；保留 {len(approved)} 项已核验结论，不重新规划或检索。')
+                try:
+                    repaired=call(REPAIR,context|{'evidence':evidence,'source_gaps':result['source_gaps'],'failed_claims':failures},Repair)
+                    if sorted(p.claim_index for p in repaired.patches)!=sorted(targets):
+                        raise llm.ModelError('局部修正必须且只能覆盖全部待修正结论，不能重复或新增下标')
+                    citation_only={f['claim_index'] for f in feedback if f['type']=='invalid_citation'}
+                    for patch in repaired.patches:
+                        if patch.claim is not None and patch.claim_index in citation_only:
+                            old=working[patch.claim_index]
+                            if (patch.claim.text,patch.claim.kind,patch.claim.section)!=(old.text,old.kind,old.section):
+                                raise llm.ModelError('修正引文时不得改变原结论；不能成立的结论应删除')
+                except llm.ModelError as exc:
+                    warnings.append(str(exc));emit('repair','局部修正未完成',str(exc),'warning')
+                    break
+                for patch in repaired.patches:
+                    if patch.claim is None:working.pop(patch.claim_index)
+                    else:working[patch.claim_index]=patch.claim
+                dropped=sum(p.claim is None for p in repaired.patches)
+                if dropped:draft=draft.model_copy(update={'insufficient':True})
+                result['missing_facts']=questions(result['missing_facts']+repaired.missing_facts)
+                emit('repair','局部修正完成',f'修正 {len(repaired.patches)-dropped} 项；删除无法支持的 {dropped} 项；修改内容仍须引用校验和独立复核。','warning' if dropped else 'completed')
+                checking=targets.intersection(working)
+            elif action=='review':
+                emit('review','仅重试未完成的复核','保留原草稿与证据，不重新检索或生成分析。')
+                checking=checking-approved
+            else:
+                for source_pass in range(2):
+                    draft=None
+                    payload=context|{'evidence':evidence,'source_gaps':result['source_gaps'],'analysis_scope':result['analysis_scope'],'repair_feedback':feedback,'previous_attempt':previous}
+                    emit('draft','分析规则与个案条件','一次检查相关性与覆盖，先回答现有原文支持的部分，同时列出推荐资料。')
+                    try:draft=call(DRAFT,payload,Draft)
+                    except llm.ModelError as exc:
+                        warnings.append(str(exc));feedback=[{'type':'model_error','reason':str(exc)}]
+                        if exc.fatal:return finish()
+                        break
+                    previous=draft.model_dump();result['missing_facts']=questions(draft.missing_facts)
+                    needs=unique_needs(needs+draft.missing_authorities);update_gaps(needs,draft.missing_authorities)
+                    if source_pass!=0 or not acquire():break
                     queries=list(dict.fromkeys(queries+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]))[:9]
                     retrieve(queries,needs);update_gaps(needs)
+                    last_key=(evidence_key(evidence),evidence_key(collector.rows));approved=set();working={}
+                if any(e['fatal'] for e in result['model_errors']):return finish()
+                if draft is None:
+                    action='retry_draft'
                     continue
-                break
-            if any(e['fatal'] for e in result['model_errors']):return finish()
-            if draft is None:continue
-            ids=tuple(sorted(r['id'] for r in evidence))
-            if not draft.claims:
-                emit('draft','尚未形成带依据的结论','模型返回空草稿；本轮没有结论进入引用校验。接下来检查法源缺口，不计为校验通过。','warning')
+                working=dict(enumerate(draft.claims));approved=set();checking=set(working)
+            previous=draft.model_dump()|{'claims':[working[i].model_dump() for i in sorted(working)]}
+            if not working:
+                emit('draft','尚未形成带依据的结论',('局部修正已删除全部无法支持的结论。' if action=='repair' else '模型返回空草稿。')+'本轮没有结论进入引用校验，不计为校验通过。','warning')
                 result['coverage']=CoverageAudit(selected_ids=[],coverage='missing',missing_authorities=draft.missing_authorities,reason=draft.limitation or '现有资料未形成相关的受支持结论。').model_dump()
-                feedback=[{'type':'empty_draft','missing_authorities':[x.model_dump() for x in draft.missing_authorities],'legal_issues':result['legal_issues'],'reason':draft.limitation or '需补齐核心法源；已有一般规则时可作条件分析。'}]
-                if result['source_gaps'] or result['missing_facts'] or result['legal_issues'] or ids==last_ids:break
-                last_ids=ids;continue
-            valid,feedback=[],[]
+                break
+            valid=[]
+            feedback=[f for f in feedback if f['type']=='unsupported_claim' and f['claim_index'] in working and f['claim_index'] not in checking]
             emit('citations','校验引用原文','逐项核对法规ID、完整条文中的连续引文、法规名称和条号。')
-            for i,claim in enumerate(draft.claims):
+            for i,claim in working.items():
                 ok,reason=validate_claim(claim,evidence,library_names)
-                if ok:valid.append(claim)
-                else:feedback.append({'claim_index':i,'type':'invalid_citation','reason':reason})
-            emit('citations','引用校验完成',f'通过 {len(valid)} 项；需修正 {len(feedback)} 项。','completed' if not feedback else 'warning')
-            selected_ids=list(dict.fromkeys(ref.article_id for claim in valid for ref in claim.evidence))
+                if ok:valid.append(i)
+                else:
+                    approved.discard(i)
+                    feedback.append({'claim_index':i,'type':'invalid_citation','text':claim.text,'reason':reason})
+            invalid=sum(f['type']=='invalid_citation' for f in feedback)
+            emit('citations','引用校验完成',f'通过 {len(valid)} 项；需修正 {invalid} 项。','completed' if not invalid else 'warning')
+            selected_ids=list(dict.fromkeys(ref.article_id for i in valid for ref in working[i].evidence))
             coverage=draft.coverage or ('partial' if draft.insufficient or result['source_gaps'] else 'sufficient')
             if not valid:coverage='missing'
             elif draft.insufficient or result['source_gaps'] or coverage=='missing':coverage='partial'
             result['coverage']=CoverageAudit(selected_ids=selected_ids,coverage=coverage,missing_authorities=draft.missing_authorities,reason=draft.limitation or '与法律分析合并检查；结论仍须独立复核。').model_dump()
             emit('coverage','法源覆盖与分析一并完成',f"候选 {len(evidence)} 条；覆盖状态 {coverage}；推荐补充 {len(result['source_gaps'])} 项。",'completed' if coverage=='sufficient' else 'warning')
-            if not valid:last_ids=ids;continue
-            emit('review','复核证据支持性','检查引用是否支持结论，核对例外、过渡适用、否定、未知和是否遗漏关键条件。')
-            try:
-                verdict=call(VERIFY,context|{'evidence':evidence,'source_gaps':result['source_gaps'],'coverage':result['coverage'],'draft':[c.model_dump() for c in valid]},Verdict,verify=True)
-                if sorted(v.claim_index for v in verdict.checks)!=list(range(len(valid))):raise llm.ModelError('复核结果不完整')
-            except llm.ModelError as exc:
-                warnings.append(str(exc));feedback.append({'type':'review_error','reason':str(exc)})
-                if exc.fatal:return finish()
-                continue
-            approved={v.claim_index for v in verdict.checks if v.supported}
-            feedback.extend({'type':'unsupported_claim','text':valid[v.claim_index].text,'reason':v.reason} for v in verdict.checks if not v.supported)
-            emit('review','证据复核完成',f'支持 {len(approved)} 项；需补证或改写 {len(valid)-len(approved)} 项。','completed' if len(approved)==len(valid) else 'warning')
-            if approved:save_claims(valid,approved,evidence);result['status']='partial'
+            review_indices=[i for i in valid if i in checking and i not in approved]
+            if review_indices:
+                emit('review','复核证据支持性','检查引用是否支持结论，核对例外、过渡适用、否定、未知和是否遗漏关键条件；同一证据下已通过的结论不重复复核。')
+                try:
+                    verdict=call(VERIFY,context|{'evidence':evidence,'source_gaps':result['source_gaps'],'coverage':result['coverage'],'draft':[working[i].model_dump() for i in review_indices],
+                        'verified_claims':[working[i].model_dump() for i in sorted(approved)]},Verdict,verify=True)
+                    if sorted(v.claim_index for v in verdict.checks)!=list(range(len(review_indices))):raise llm.ModelError('复核结果不完整')
+                except llm.ModelError as exc:
+                    warnings.append(str(exc));emit('review','证据复核未完成',str(exc),'warning')
+                    if exc.fatal:return finish()
+                    action='review'
+                    continue
+                for v in verdict.checks:
+                    i=review_indices[v.claim_index]
+                    if v.supported:approved.add(i)
+                    else:feedback.append({'claim_index':i,'type':'unsupported_claim','text':working[i].text,'reason':v.reason,'action':v.action})
+                supported=sum(v.supported for v in verdict.checks)
+                emit('review','证据复核完成',f'支持 {supported} 项；需补证或改写 {len(review_indices)-supported} 项。','completed' if supported==len(review_indices) else 'warning')
+            if approved:
+                save_claims([working[i] for i in sorted(approved)],evidence);result['status']='partial'
             if approved and not feedback and not draft.insufficient and not result['source_gaps'] and not result['missing_facts'] and coverage=='sufficient':
-                result['claims']=[];save_claims(valid,approved,evidence);result['status']='answered';return finish()
-            if approved and not feedback:return finish()
-            last_ids=ids
+                result['status']='answered';return finish()
+            if not feedback:return finish()
+            action='retrieve' if any(f['type']=='unsupported_claim' and f['action']=='retrieve' for f in feedback) else 'repair'
         return finish()
     try:
         with llm.controlled(check,deadline), retrieval.observe(on_retrieval):return run()

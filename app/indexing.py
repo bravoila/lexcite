@@ -17,6 +17,7 @@ def ensure_schema():
     with db.connect() as c:
         c.executescript('''
         CREATE TABLE IF NOT EXISTS article_headings(article_id TEXT PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,heading_path TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS law_snapshots(law_id TEXT PRIMARY KEY REFERENCES laws(id) ON DELETE CASCADE,content BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS embedding_states(
             article_id TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,fingerprint TEXT NOT NULL,
             content_hash TEXT NOT NULL,status TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',updated TEXT NOT NULL,
@@ -65,8 +66,8 @@ def mark_headings(connection, ids, text):
     for match in ARTICLE.finditer(text):
         if not _reference_reason(text,match):offsets.setdefault(normalize(match[1]),match.start())
     path=[];positions=[]
-    for m in re.finditer(r'(?m)^\s*(第[零〇一二三四五六七八九十百千万0-9]+([编章节])[^\n]{0,90})\s*$',text):
-        level={'编':0,'章':1,'节':2}[m[2]]
+    for m in re.finditer(r'(?m)^\s*(第[零〇一二三四五六七八九十百千万0-9]+(部分|编|章|节)[^\n]{0,90})\s*$',text):
+        level={'部分':0,'编':1,'章':2,'节':3}[m[2]]
         path=[(n,t) for n,t in path if n<level]+[(level,m[1].strip())]
         positions.append((m.end(),' / '.join(t for _,t in path)))
     for aid,number,body in ids:
