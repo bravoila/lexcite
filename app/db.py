@@ -89,6 +89,7 @@ def init():
             id TEXT PRIMARY KEY,action TEXT NOT NULL,details TEXT NOT NULL,created TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_messages_case ON messages(case_id,created);
         CREATE INDEX IF NOT EXISTS idx_article_law ON articles(law_id);
+        CREATE INDEX IF NOT EXISTS idx_law_eligibility ON laws(jurisdiction,valid_from,valid_to,reviewed_at);
         ''')
         # Additive, repeatable migration: existing data and citation snapshots stay intact.
         columns = {row[1] for row in c.execute("PRAGMA table_info(laws)")}
@@ -100,6 +101,23 @@ def init():
         c.execute("CREATE TABLE IF NOT EXISTS case_state_snapshots(case_id TEXT PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,payload TEXT NOT NULL)")
         if "source_name" not in columns:
             c.execute("ALTER TABLE laws ADD COLUMN source_name TEXT NOT NULL DEFAULT '导入正文'")
+        for table in ("laws", "articles"):
+            corpus_triggers(c, table)
+
+
+def corpus_triggers(connection, table):
+    if table not in ("laws", "articles", "article_headings"):
+        raise ValueError("未知法库表")
+    for action in ("INSERT", "UPDATE", "DELETE"):
+        connection.execute(f"""CREATE TRIGGER IF NOT EXISTS corpus_{table}_{action.lower()}
+            AFTER {action} ON {table} BEGIN
+            INSERT INTO kv(key,value) VALUES('corpus_revision','1')
+            ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1;
+            END""")
+
+
+def corpus_version():
+    return str((data_dir() / "lexcite.sqlite3").resolve()), int(get("corpus_revision", 0))
 
 
 def get(key, default=None):

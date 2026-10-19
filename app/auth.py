@@ -4,14 +4,19 @@ import os
 import secrets
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict
 from fastapi import HTTPException, Request
 from . import db
 
 LOCK = threading.Lock()
-ATTEMPTS = defaultdict(list)
+ATTEMPTS = OrderedDict()
 GLOBAL_FAILS = []
 LOCAL_ADDRESSES = {"127.0.0.1", "::1"}
+MAX_ATTEMPT_ADDRESSES = 4096
+HASH_SLOTS = threading.BoundedSemaphore(2)
+_password_tag_key = secrets.token_bytes(32)
+_verified_password = None
+_global_next = 0.0
 
 
 def password_hash(password, salt=None):
@@ -20,14 +25,27 @@ def password_hash(password, salt=None):
     return {"salt": salt, "digest": digest}
 
 
+def _remember_password(password, stored):
+    global _verified_password
+    tag = hmac.digest(_password_tag_key, password.encode(), "sha256")
+    with LOCK:
+        # This verifier exists only in this process, never in the database.
+        _verified_password = (stored["salt"], stored["digest"], tag)
+
+
 def init():
-    if db.get("password"):
-        return
+    stored = db.get("password")
     password = os.getenv("LEXCITE_ADMIN_PASSWORD", "")
+    if stored:
+        if password and hmac.compare_digest(password_hash(password, stored["salt"])["digest"], stored["digest"]):
+            _remember_password(password, stored)
+        return
     if password:
         if len(password) < 12:
             raise RuntimeError("LEXCITE_ADMIN_PASSWORD must contain at least 12 characters")
-        db.put("password", password_hash(password))
+        stored = password_hash(password)
+        db.put("password", stored)
+        _remember_password(password, stored)
     else:
         code_file = db.data_dir() / "setup-code.txt"
         if not code_file.exists():
@@ -44,36 +62,59 @@ def setup(password, code):
         expected = (db.data_dir() / "setup-code.txt").read_text()
         if not hmac.compare_digest(str(code), expected):
             raise HTTPException(403, "初始化码不正确，请向部署管理员获取")
-        db.put("password", password_hash(password))
+        stored = password_hash(password)
+        db.put("password", stored)
         (db.data_dir() / "setup-code.txt").unlink(missing_ok=True)
+    _remember_password(password, stored)
 
 
-def login(password, address):
+def login(password, address, *, local_recovery=False):
+    global _global_next
     now = time.time()
-    local = address in LOCAL_ADDRESSES
-    with LOCK:
-        ATTEMPTS[address] = [x for x in ATTEMPTS[address] if now-x < 600]
-        limited = not local and len(ATTEMPTS[address]) >= 10
-        if not local:
-            GLOBAL_FAILS[:] = [x for x in GLOBAL_FAILS if now-x < 600]
-            throttled = len(GLOBAL_FAILS) >= 60
-        else:
-            throttled = False
-    if limited:
-        # Per-address (account) limit: only the flooded address is blocked;
-        # behind a reverse proxy the addresses come from X-Forwarded-For.
-        raise HTTPException(429, "登录尝试过多，请10分钟后重试")
-    if throttled:
-        # Global anonymous cap slows bulk guessing but never locks anyone out;
-        # the correct password still works, just delayed.
-        time.sleep(2)
     stored = db.get("password")
-    if not stored or not hmac.compare_digest(password_hash(password, stored["salt"])["digest"], stored["digest"]):
+    if not stored:
+        raise HTTPException(401, "请先完成工作空间初始化")
+    tag = hmac.digest(_password_tag_key, password.encode(), "sha256")
+    local = local_recovery and os.getenv("LEXCITE_LOCAL_RECOVERY") == "1" and address in LOCAL_ADDRESSES
+    with LOCK:
+        for key in list(ATTEMPTS):
+            attempts = [x for x in ATTEMPTS[key] if now-x < 600]
+            if attempts:
+                ATTEMPTS[key] = attempts
+            else:
+                del ATTEMPTS[key]
+        GLOBAL_FAILS[:] = [x for x in GLOBAL_FAILS if now-x < 600]
+        cached = _verified_password
+        cache_current = cached is not None and cached[:2] == (stored["salt"], stored["digest"])
+        verified = cache_current and hmac.compare_digest(tag, cached[2])
+        attempts = ATTEMPTS.get(address, [])
+        limited = not local and len(attempts) >= 10
+        throttled = not local and len(GLOBAL_FAILS) >= 60 and now < _global_next
+        retry_after = max(1, int(600 - (now-attempts[0])) + 1) if limited else 2
+        if not verified and cache_current and (limited or throttled):
+            raise HTTPException(429, "登录尝试过多，请稍后重试；正确密码不受匿名失败锁定", headers={"Retry-After": str(retry_after)})
+        if not verified and not local and len(GLOBAL_FAILS) >= 60:
+            _global_next = now + 2
+    if not verified:
+        if not HASH_SLOTS.acquire(blocking=False):
+            raise HTTPException(429, "密码校验繁忙，请稍后重试", headers={"Retry-After": "1"})
+        try:
+            verified = hmac.compare_digest(password_hash(password, stored["salt"])["digest"], stored["digest"])
+        finally:
+            HASH_SLOTS.release()
+    if not verified:
         with LOCK:
-            ATTEMPTS[address].append(now)
+            if address not in ATTEMPTS and len(ATTEMPTS) >= MAX_ATTEMPT_ADDRESSES:
+                ATTEMPTS.popitem(last=False)
+            ATTEMPTS[address] = (ATTEMPTS.get(address, []) + [now])[-10:]
+            ATTEMPTS.move_to_end(address)
             if not local:
                 GLOBAL_FAILS.append(now)
+                GLOBAL_FAILS[:] = GLOBAL_FAILS[-60:]
+        if limited or throttled:
+            raise HTTPException(429, "登录尝试过多，请稍后重试", headers={"Retry-After": str(retry_after)})
         raise HTTPException(401, "密码不正确")
+    _remember_password(password, stored)
     with LOCK:
         ATTEMPTS.pop(address, None)
     token = secrets.token_urlsafe(32)

@@ -1,14 +1,20 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
+from email.utils import parsedate_to_datetime
 import time
 import hashlib
 import json
+import math
+import logging
 import os
 import re
+import socket
+import threading
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 from . import db
-from .models import SettingsInput
+from .models import SettingsInput, validate_configuration
 
 
 load_dotenv(db.ROOT / ".env", override=False)
@@ -16,6 +22,8 @@ _control = ContextVar("model_control", default=None)
 _reasoning = ContextVar("provider_reasoning", default=None)
 _usage = ContextVar("provider_usage", default=None)
 _request_options = ContextVar("model_request_options", default=None)
+_attempts = ContextVar("model_http_attempts", default=None)
+MAX_RESPONSE_BYTES = 4_000_000
 
 
 @contextmanager
@@ -52,6 +60,15 @@ def capture_usage(callback):
 
 
 @contextmanager
+def capture_attempts(callback):
+    token = _attempts.set(callback)
+    try:
+        yield
+    finally:
+        _attempts.reset(token)
+
+
+@contextmanager
 def request_options(**options):
     token = _request_options.set(options)
     try:
@@ -68,11 +85,12 @@ def report_usage(value):
 
 
 class ModelError(Exception):
-    def __init__(self, message, *, fatal=False, status_code=None, code=""):
+    def __init__(self, message, *, fatal=False, status_code=None, code="", retry_after=None):
         super().__init__(message)
         self.fatal = fatal
         self.status_code = status_code
         self.code = code
+        self.retry_after = retry_after
 
 
 def profile_defaults(profile):
@@ -80,12 +98,11 @@ def profile_defaults(profile):
     provider_default = "ollama" if profile == "local" else "dashscope"
     base_default = "http://host.docker.internal:11434/v1" if profile == "local" else "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model_default = "qwen3:8b" if profile == "local" else "qwen-plus"
-    configured = SettingsInput(
-        provider=os.getenv(f"{prefix}_PROVIDER") or os.getenv("MODEL_PROVIDER") or provider_default,
-        base_url=os.getenv(f"{prefix}_BASE_URL") or os.getenv("MODEL_BASE_URL") or base_default,
-        model=os.getenv(f"{prefix}_NAME") or os.getenv("MODEL_NAME") or model_default,
-    )
-    return {key: configured.model_dump()[key] for key in ("provider", "base_url", "model")}
+    return {
+        "provider": os.getenv(f"{prefix}_PROVIDER") or os.getenv("MODEL_PROVIDER") or provider_default,
+        "base_url": (os.getenv(f"{prefix}_BASE_URL") or os.getenv("MODEL_BASE_URL") or base_default).rstrip("/"),
+        "model": os.getenv(f"{prefix}_NAME") or os.getenv("MODEL_NAME") or model_default,
+    }
 
 
 def profile_api_key(profile):
@@ -93,7 +110,7 @@ def profile_api_key(profile):
     return os.getenv(f"{prefix}_API_KEY") or os.getenv("MODEL_API_KEY") or ""
 
 
-def settings():
+def settings(*, validate=True):
     stored = db.get("settings", {})
     s = SettingsInput().model_dump()
     s.update(stored)
@@ -103,26 +120,37 @@ def settings():
     elif not profile and stored.get("provider") in ("dashscope", "deepseek", "siliconflow"):
         profile = "api"
     profile = profile or os.getenv("MODEL_PROFILE", "local")
-    if profile not in ("local", "api"):
-        raise RuntimeError("MODEL_PROFILE must be either 'local' or 'api'")
     s["profile"] = profile
-    for field, value in profile_defaults(profile).items():
+    for field, value in profile_defaults(profile if profile in ("local", "api") else "local").items():
         if field not in stored:
             s[field] = value
     s["api_key"] = s.get("api_key") or ""
-    return s
+    return validate_configuration(SettingsInput, s, "模型") if validate else s
+
+
+def environment_api_key(s):
+    if s["profile"] not in ("local", "api"):
+        return ""
+    defaults = profile_defaults(s["profile"])
+    bound = all(s.get(key, "").rstrip("/") == defaults[key] for key in ("provider", "base_url"))
+    return profile_api_key(s["profile"]) if bound and not s.get("environment_key_disabled") else ""
 
 
 def public_settings():
-    s = settings()
+    s = settings(validate=False)
+    try:
+        s = validate_configuration(SettingsInput, s, "模型")
+    except ValueError as exc:
+        s["configuration_error"] = str(exc)
     stored = db.get("settings", {})
     profile = s["profile"]
     encrypted = s.pop("api_key_encrypted", "")
     s.pop("api_key", None)
-    uses_environment_key = not encrypted and bool(profile_api_key(profile))
+    uses_environment_key = not encrypted and bool(environment_api_key(s))
     s["has_api_key"] = bool(encrypted or uses_environment_key)
     s["environment_api_key"] = uses_environment_key
     s.pop("api_key_encrypted", None)
+    s.pop("environment_key_disabled", None)
     s["environment_defaults"] = any(field not in stored for field in ("provider", "base_url", "model")) or uses_environment_key
     s["profiles"] = {
         name: profile_defaults(name) | {"environment_api_key": bool(profile_api_key(name))}
@@ -132,8 +160,11 @@ def public_settings():
 
 
 def save_settings(value):
-    from cryptography.fernet import Fernet
-    old = db.get("settings", {})
+    old = settings(validate=False)
+    value = dict(value)
+    if "profile" not in value:
+        value["profile"] = "local" if value.get("provider") == "ollama" else "api" if value.get("provider") in ("dashscope", "deepseek", "siliconflow") else old["profile"]
+    value = validate_configuration(SettingsInput, value, "模型")
     key = value.pop("api_key", None)
     # The stored key is bound to its endpoint; changing profile/provider/base_url
     # without supplying a new key clears it instead of leaking it to a new host.
@@ -144,11 +175,11 @@ def save_settings(value):
         value["api_key_encrypted"] = old["api_key_encrypted"]
     else:
         value["api_key_encrypted"] = ""
+    value["environment_key_disabled"] = key == "" or (key is None and old.get("environment_key_disabled", False))
     db.put("settings", value)
 
 
 def cipher():
-    from cryptography.fernet import Fernet
     p = db.data_dir() / "secret.key"
     if not p.exists():
         try:
@@ -157,6 +188,7 @@ def cipher():
                 f.write(Fernet.generate_key())
         except FileExistsError:
             pass
+    p.chmod(0o600)
     return Fernet(p.read_bytes())
 
 
@@ -165,10 +197,10 @@ def resolved():
     if s.get("api_key_encrypted"):
         try:
             s["api_key"] = cipher().decrypt(s["api_key_encrypted"].encode()).decode()
-        except Exception as e:
+        except (ValueError, UnicodeError, InvalidToken) as e:
             raise ModelError("模型密钥无法解密，请在设置中重新保存") from e
     else:
-        s["api_key"] = profile_api_key(s["profile"])
+        s["api_key"] = environment_api_key(s)
     return s
 
 
@@ -180,6 +212,102 @@ def parse_json(text):
     if not isinstance(value, dict):
         raise ValueError("Expected a JSON object")
     return value
+
+
+def response_chunks(response, check, limit=MAX_RESPONSE_BYTES):
+    size = 0
+    for chunk in response.iter_bytes():
+        check()
+        size += len(chunk)
+        if size > limit:
+            raise ModelError("模型响应超过大小限制")
+        yield chunk
+    check()
+
+
+@contextmanager
+def interruptible_response(response, check):
+    stream = response.extensions.get("network_stream")
+    connection = stream.get_extra_info("socket") if stream else None
+    if connection is None:
+        yield
+        return
+    stopped, interruption = threading.Event(), []
+
+    def watch():
+        while not stopped.wait(.05):
+            try:
+                check()
+            except (ModelError, InterruptedError) as exc:
+                interruption.append(exc)
+                # shutdown, unlike close alone, interrupts a concurrent blocked recv.
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError as error:
+                    logging.getLogger("lexcite").debug("Model connection already closed during interruption: %s", type(error).__name__)
+                return
+
+    watcher = threading.Thread(target=watch, name="lexcite-model-deadline", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        watcher.join()
+        if interruption:
+            raise interruption[0]
+
+
+def response_message(response, streaming, check, secret=""):
+    chunks = response_chunks(response, check)
+    if not streaming or "application/json" in response.headers.get("content-type", "").lower():
+        result = json.loads(b"".join(chunks))
+        report_usage(result.get("usage"))
+        choice = result["choices"][0]
+        message = choice["message"]
+        report_reasoning(message.get("reasoning_content") or message.get("reasoning"))
+        return message.get("content") or "", choice.get("finish_reason")
+
+    def lines():
+        pending = bytearray()
+        for chunk in chunks:
+            pending.extend(chunk)
+            while b"\n" in pending:
+                line, _, remaining = pending.partition(b"\n")
+                pending = bytearray(remaining)
+                yield line.rstrip(b"\r").decode("utf-8")
+        if pending:
+            yield pending.decode("utf-8")
+
+    content, finish_reason = [], None
+    for line in lines():
+        check()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        report_usage(chunk.get("usage"))
+        if chunk.get("error"):
+            error = chunk["error"]
+            raise ModelError("模型流式接口报错：" + safe_error(error.get("message", "服务未完成响应") if isinstance(error, dict) else error, secret))
+        choices = chunk.get("choices", [])
+        if choices:
+            choice = choices[0]
+            delta = choice.get("delta", {})
+            report_reasoning(delta.get("reasoning_content") or delta.get("reasoning"))
+            content.append(delta.get("content") or "")
+            finish_reason = choice.get("finish_reason") or finish_reason
+    return "".join(content), finish_reason
+
+
+def wait_before_retry(delay, check):
+    end = time.monotonic() + delay
+    while time.monotonic() < end:
+        check()
+        time.sleep(max(0, min(.1, end-time.monotonic())))
+    check()
 
 
 def request_json(system, payload, schema, verify=False):
@@ -214,68 +342,39 @@ def request_json(system, payload, schema, verify=False):
     headers = {"Content-Type": "application/json"}
     if s["api_key"]:
         headers["Authorization"] = "Bearer " + s["api_key"]
-    try:
-        timeout = s["timeout"]
+    deadline = min(time.monotonic()+s["timeout"], control[1] if control else float("inf"))
+
+    def check():
         if control:
-            timeout = max(.1, min(timeout, control[1] - time.monotonic()))
-        with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
-            if body["stream"]:
-                content, finish_reason, byte_count = "", None, 0
-                with client.stream("POST", s["base_url"] + "/chat/completions", json=body, headers=headers) as r:
-                    check_status(r, s["api_key"])
-                    received_json = "application/json" in r.headers.get("content-type", "").lower()
-                    if received_json:
-                        raw = bytearray()
-                        for chunk in r.iter_bytes():
-                            if control:
-                                control[0]()
-                            raw.extend(chunk)
-                            if len(raw) > 4_000_000:
-                                raise ModelError("模型响应超过大小限制")
-                        result = json.loads(raw)
-                        report_usage(result.get("usage"))
-                        choice = result["choices"][0]
-                        finish_reason = choice.get("finish_reason")
-                        message = choice["message"]
-                        report_reasoning(message.get("reasoning_content") or message.get("reasoning"))
-                        content = message.get("content") or ""
-                    for line in (() if received_json else r.iter_lines()):
-                        if control:
-                            control[0]()
-                        byte_count += len(line)
-                        if byte_count > 4_000_000:
-                            raise ModelError("模型响应超过大小限制")
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            break
-                        chunk = json.loads(data)
-                        report_usage(chunk.get("usage"))
-                        if chunk.get("error"):
-                            error = chunk["error"]
-                            raise ModelError("模型流式接口报错：" + safe_error(error.get("message", "服务未完成响应") if isinstance(error, dict) else str(error), s["api_key"]))
-                        choices = chunk.get("choices", [])
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        delta = choice.get("delta", {})
-                        report_reasoning(delta.get("reasoning_content") or delta.get("reasoning"))
-                        content += delta.get("content") or ""
-                        finish_reason = choice.get("finish_reason") or finish_reason
-                if finish_reason != "stop":
-                    raise ModelError("模型流式输出未完整结束，请检查输出上限、网络或模型兼容性")
-            else:
-                r = client.post(s["base_url"] + "/chat/completions", json=body, headers=headers)
-                check_status(r, s["api_key"])
-                result = r.json()
-                report_usage(result.get("usage"))
-                choice = result["choices"][0]
-                finish_reason = choice.get("finish_reason")
-                content = choice["message"]["content"]
-                report_reasoning(choice["message"].get("reasoning_content") or choice["message"].get("reasoning"))
-            if control:
-                control[0]()
+            control[0]()
+        if time.monotonic() >= deadline:
+            raise ModelError("模型调用已达到单次墙钟时限")
+
+    try:
+        with httpx.Client(timeout=s["timeout"], follow_redirects=False, trust_env=False) as client:
+            for attempt in range(1, 4):
+                check()
+                observer = _attempts.get()
+                if observer:
+                    observer(attempt)
+                try:
+                    with client.stream("POST", s["base_url"] + "/chat/completions", json=body, headers=headers,
+                                       timeout=max(.001, deadline-time.monotonic())) as response:
+                        with interruptible_response(response, check):
+                            check_status(response, s["api_key"], check=check)
+                            content, finish_reason = response_message(response, body["stream"], check, s["api_key"])
+                    break
+                except ModelError as exc:
+                    if exc.status_code not in (429, 500, 502, 503, 504) or attempt == 3:
+                        raise
+                    delay = exc.retry_after if exc.retry_after is not None else .5 * 2 ** (attempt-1)
+                    if delay >= deadline-time.monotonic():
+                        raise ModelError(str(exc)+"；重试等待超出本次调用剩余时限，未继续请求",
+                                         status_code=exc.status_code, code=exc.code) from exc
+                    wait_before_retry(delay, check)
+            check()
+            if body["stream"] and finish_reason != "stop":
+                raise ModelError("模型流式输出未完整结束，请检查输出上限、网络或模型兼容性")
             if finish_reason == "length":
                 raise ModelError("模型输出被截断，请提高输出长度或缩小问题范围")
             if finish_reason not in ("stop", None):
@@ -290,7 +389,7 @@ def request_json(system, payload, schema, verify=False):
             return schema.model_validate(parse_json(content))
     except (ModelError, InterruptedError):
         raise
-    except Exception as e:
+    except (httpx.HTTPError, AttributeError, KeyError, IndexError, TypeError, ValueError) as e:
         raise ModelError("本次模型调用未返回完整结构化结果，请检查模式、输出长度和接口兼容性") from e
 
 
@@ -302,32 +401,47 @@ def safe_error(message, secret=""):
     return text[:650]
 
 
-def check_status(response, secret=""):
+def check_status(response, secret="", *, check=None):
     status = response.status_code
     if status < 300:
         return
     code, message = "", "请核对服务地址、模型权限和请求参数"
+    control = _control.get()
+    check = check or (control[0] if control else lambda: None)
+    retry_after = None
+    header = response.headers.get("retry-after", "")
+    if header:
+        try:
+            retry_after = max(0, float(header))
+            if not math.isfinite(retry_after):
+                retry_after = None
+        except ValueError:
+            try:
+                retry_after = max(0, parsedate_to_datetime(header).timestamp()-time.time())
+            except (ValueError, TypeError, OverflowError):
+                retry_after = None
     try:
         if response.is_stream_consumed:
             payload = response.json()
         else:
             raw = bytearray()
             for chunk in response.iter_bytes():
-                raw.extend(chunk)
-                if len(raw) > 16000:
+                check()
+                raw.extend(chunk[:16000-len(raw)])
+                if len(raw) >= 16000:
                     break
             payload = json.loads(raw)
         error = payload.get("error", payload)
         if isinstance(error, dict):
             code = safe_error(error.get("code", ""), secret)
             message = safe_error(error.get("message", message), secret)
-    except Exception:
-        pass
+    except (AttributeError, ValueError, TypeError, UnicodeError, httpx.HTTPError):
+        message = "服务未返回可读取的错误说明；请核对服务地址、模型权限和请求参数"
     hint = ""
     if status in (400, 422):
         hint = "；可检查‘输出格式’与思考模式兼容性、模型输出长度及服务地址"
     raise ModelError(f"模型接口 HTTP {status}" + (f"（{code}）" if code else "") + f"：{message}{hint}",
-                     fatal=status in (400, 401, 402, 403, 404, 422), status_code=status, code=code)
+                     fatal=status in (400, 401, 402, 403, 404, 422), status_code=status, code=code, retry_after=retry_after)
 
 
 def embedding_fingerprint(s=None):

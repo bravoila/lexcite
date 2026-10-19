@@ -62,10 +62,10 @@ def test_preview_only_needs_text_saving_requires_metadata(client):
 
 
 def test_versioned_assets_and_no_cache(client):
-    for path in ("/", "/assets/1.3.2/app.js", "/assets/1.3.2/style.css", "/static/app.js"):
+    for path in ("/", "/assets/1.4.0/app.js", "/assets/1.4.0/style.css", "/static/app.js"):
         r = client.get(path)
         assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
-    assert client.get("/api/session").json()["version"] == "1.3.2"
+    assert client.get("/api/session").json()["version"] == "1.4.0"
     assert client.get("/assets/1.0.1/app.js").status_code == 404
     html = client.get("/").text
-    assert '/assets/1.3.2/app.js' in html and '/static/app.js' not in html
+    assert '/assets/1.4.0/app.js' in html and '/static/app.js' not in html

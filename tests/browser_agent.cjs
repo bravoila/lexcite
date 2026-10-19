@@ -16,7 +16,7 @@ let browser;const checks=[];
  await page.locator('#question').fill('未支付价款怎么办？');await page.locator('.web-options summary').click();await page.locator('#web-query').fill('浏览器公开检索测试');await page.locator('#send').click();
  await page.locator('#working').waitFor({state:'visible'});assert(await page.locator('#send').isDisabled());checks.push('job-running-visible');
  await page.reload();await page.locator('#working').waitFor({state:'visible'});assert(await page.locator('#send').isDisabled());checks.push('reload-resumes-real-job');const bounds=await page.locator('#working').boundingBox();assert(bounds.y>=0&&bounds.y+bounds.height<=900,'progress outside viewport');
- await page.getByText('制定修正方案',{exact:false}).first().waitFor({state:'attached'});checks.push('invalid-quote-enters-repair');
+ await page.getByText('局部修正未通过的结论',{exact:false}).first().waitFor({state:'attached'});checks.push('invalid-quote-enters-repair');
  await page.screenshot({path:path.join(output,'agent-progress.png'),fullPage:false});
  await page.locator('.claim').waitFor({state:'visible'});assert.equal(await page.locator('.message.user').count(),1);assert.equal(await page.locator('.answer').count(),1);checks.push('repaired-answer-saved-once');const exported=await context.request.get(base+'/api/cases/'+cid+'/export');assert((await exported.text()).includes('研究步骤'));checks.push('export-includes-agent-trace');
  await page.locator('.web-leads>summary').click();await page.locator('.web-lead').waitFor({state:'visible'});assert((await page.locator('.web-lead').innerText()).includes('已读取官网正文'));checks.push('web-lead-read-but-unreviewed');
@@ -29,6 +29,7 @@ let browser;const checks=[];
  // Standalone tutorial: offline page, provider tabs, deep links, print & mobile.
  const guide=process.env.LEXCITE_GUIDE_PATH;if(guide){
   const tutorial=await context.newPage();tutorial.on('pageerror',e=>errors.push(e.message));await tutorial.goto('file://'+guide);
+  const initialize=await tutorial.locator('#initialize').innerText();assert(initialize.includes('docker compose exec lexcite cat data/setup-code.txt'));assert(initialize.includes('初始化码不会写入启动日志'));assert(!initialize.includes('在日志中找这行字'));checks.push('guide-setup-code-file-instructions');
   assert(await tutorial.locator('#panel-aliyun').isVisible());assert(await tutorial.locator('#panel-deepseek').isHidden());
   await tutorial.locator('#tab-deepseek').click();assert(await tutorial.locator('#panel-deepseek').isVisible());assert(await tutorial.locator('#panel-aliyun').isHidden());checks.push('guide-provider-tabs');
   await tutorial.locator('#tab-deepseek').press('ArrowRight');assert(await tutorial.locator('#panel-siliconflow').isVisible());assert.equal(await tutorial.locator('#tab-siliconflow').getAttribute('aria-selected'),'true');checks.push('guide-keyboard-tabs');

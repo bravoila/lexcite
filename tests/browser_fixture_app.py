@@ -42,7 +42,7 @@ sources.download_official = fixture_download
 # Deterministic agent fixtures; activated by the explicit fixture model / query.
 import time
 from app import llm, websearch
-from app.research_agent.schemas import CoverageAudit, FactExtraction, Plan, Draft, Verdict, ClarificationAudit
+from app.research_agent.schemas import FactExtraction, Plan, Draft, Repair, Verdict, ClarificationAudit
 _real_request = llm.request_json
 
 
@@ -52,7 +52,6 @@ def fixture_model(system, payload, schema, verify=False):
         if schema is Plan:
             name='《最高人民法院关于测试纠纷的规定》' if '目录外' in payload['question'] else '《中华人民共和国刑法》'
             return Plan(queries=['过失致人死亡'],authorities=[{'name':name,'articles':['第十五条','第二百三十三条']}])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if r['number'] in ('第15条','第233条')],coverage='sufficient',reason='合成数据，仅验证法源流程')
         if schema is Draft:
             name='最高人民法院关于测试纠纷的规定' if '目录外' in payload['question'] else '中华人民共和国刑法'
             selected=[r for r in payload['evidence'] if r['number'] in ('第15条','第233条') and r['name']=='中华人民共和国刑法']
@@ -64,13 +63,13 @@ def fixture_model(system, payload, schema, verify=False):
         time.sleep(.2)
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=['彩礼纠纷'],authorities=[{'name':CORE_NAME,'articles':['第五条']}])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if r['number']=='第五条' and r['name']==CORE_NAME],coverage='sufficient',reason='浏览器测试候选；不代表真实法律分析')
         if schema is Draft:
-            row=next(r for r in payload['evidence'] if r['number']=='第五条' and r['name']==CORE_NAME)
+            row=next((r for r in payload['evidence'] if r['number']=='第五条' and r['name']==CORE_NAME),None)
+            if row is None:
+                return Draft(missing_authorities=[{'name':CORE_NAME,'articles':['第五条']}])
             return Draft(insufficient=False,claims=[{'text':'此处展示带原文引用的测试结论，供验证新版研究界面。','kind':'rule','section':'answer','evidence':[{'article_id':row['id'],'quote':row['body']}]},{'text':'本轮保留用户已提供的信息，以下内容仅用于验证页面。','kind':'inference','section':'application','evidence':[{'article_id':row['id'],'quote':row['body']}]}])
         if schema is Verdict:return Verdict(checks=[{'claim_index':i,'supported':True,'reason':'浏览器协议测试'} for i in range(len(payload['draft']))])
 
-    if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Browser protocol fixture')
     if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
     model = llm.settings()['model']
     if model == 'memory-browser-error':
@@ -94,8 +93,15 @@ def fixture_model(system, payload, schema, verify=False):
         return Plan(queries=['未支付价款 违约责任'])
     if schema is Draft:
         row = payload['evidence'][0]
-        quote = row['body'] if payload.get('previous_attempt') else '这是测试用错误引文不在原文中'
-        return Draft(insufficient=False, claims=[{'text':'在不履行合同义务的情形下，应结合约定及法律适用条件判断责任。', 'kind':'inference', 'evidence':[{'article_id':row['id'],'quote':quote}]}])
+        return Draft(insufficient=False, claims=[{'text':'在不履行合同义务的情形下，应结合约定及法律适用条件判断责任。', 'kind':'inference', 'evidence':[{'article_id':row['id'],'quote':'这是测试用错误引文不在原文中'}]}])
+    if schema is Repair:
+        patches=[]
+        for failed in payload['failed_claims']:
+            claim=failed['claim']
+            for ref in claim['evidence']:
+                ref['quote']=next(r['body'] for r in payload['evidence'] if r['id']==ref['article_id'])
+            patches.append({'claim_index':failed['claim_index'],'claim':claim})
+        return Repair(patches=patches)
     return Verdict(checks=[{'claim_index':i,'supported':True,'reason':'仅用于浏览器界面测试'} for i in range(len(payload['draft']))])
 
 
@@ -131,7 +137,6 @@ def hybrid_fixture_model(system,payload,schema,verify=False):
     if llm.settings()['model']!='hybrid-browser-analysis':return _previous_fixture_model(system,payload,schema,verify)
     if schema is Plan:return Plan(queries=['怎么帮人看娃'])
     if schema is FactExtraction:return FactExtraction(intent='new_question',facts=[])
-    if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if '照管' in r['body']],coverage='sufficient',reason='合成检索用例，无法证明真实模型效果')
     if schema is Draft:
         row=payload['evidence'][0]
         return Draft(insufficient=False,claims=[{'text':'本条为测试引用，用于核对混合检索的数据传递。','kind':'rule','evidence':[{'article_id':row['id'],'quote':row['body']}]}])

@@ -2,524 +2,415 @@
 
 | 项 | 内容 |
 |---|---|
-| 文档版本 | v0.5 |
+| 文档版本 | v1.0(三审复核终版,取代 v0.5) |
 | 日期 | 2026-10-17 |
-| 当前版本 | 1.3.2(已重构 + P0、P1 安全加固与导入/解析可靠性已修复,见下) |
-| 代码基线 | git HEAD `acb2c23 restructure` + 工作区 R3 P0 / R4 安全加固 / R5 导入解析修复(未提交) |
-| 测试基线 | 286 项 pytest 全通过(基线 218 项 + R3 新增 14 条 P0 回归 + R4 新增 14 条 P1 安全回归 + R5 新增 19 条 P1 导入解析回归 + 另有 21 条为研究 Agent 局部修正阶段的并行修改回归) |
-| 审查轮次 | **R1(重构前)**:4 个模块并行审查 + 人工交叉验证;**R2(重构后)**:2 个 agent 复审(研究 Agent 新包 / 工作区改动)+ 逐项 grep 复核;**R3**:P0-1~P0-5 修复并配齐回归测试;**R4**:P1-1~P1-7 安全加固修复并配齐回归测试;**R5**:P1-8~P1-14 导入/解析可靠性修复并配齐回归测试 |
-| 重构说明 | `app/engine.py`、`retrieval.py`、`authorities.py`、`case_state.py` 已删除,逻辑迁入 `app/research_agent/`(runner / retrieval / verification / authorities / context / schemas / prompts)。context.py 与旧 case_state.py 的 12 个函数字节码一致,文档与实现一致,测试未改弱 |
+| 审查时版本 | 1.3.2(重构 + R3/R4/R5 修复已全部提交,HEAD `f2f002c`) |
+| 代码基线 | git HEAD `f2f002c "bug fixes"`(工作区干净;原 v0.5 所称「未提交」已由并行工具链提交,内容与本轮审查一致) |
+| 测试基线 | 286 项 pytest 全通过;浏览器脚本合计 70 个检查断言(v0.5 所写「59 项」不准) |
+| 审查轮次 | R1~R5 同 v0.5;**R6(本轮三审)**:5 路并行审计——P0 修复核验、P1 安全核验、P1 导入解析核验、未修复项核验、全新缺陷扫描;关键结论均已由人工复核代码/实测确认 |
+| 三审结论 | 20 项「已修复」中 **12 项合格、8 项需返工**(按下方分类表及8项列举校正原13/7计数：P0-1、P0-4、P1-1、P1-2、P1-8、P1-9、P1-11、P1-14,含 2 项 P0 级);P1-19 实际已修复(PRD 原称部分);另新增 41 项问题(安全部署 14、导入解析 13、研究引擎/前端 14),其中 **4 项发布阻断级** |
+| 当前整改记录 | 2026-10-19，代码版本1.4.0；实现、确认的策略与未完成发布门槛见§15 |
+
+> §1–14及附录A保留2026-10-17的审查基线，“未修复”等历史标签不代表当前代码状态。§15记录本轮交付；与历史验收措辞冲突时，以§15确认的共享密码策略和反代配置为准。工程回归通过不等于真实模型或法律评测通过。
 
 ## 1. 背景与目标
 
-1.3.2 已实现混合 RAG、有状态研究循环、引用校验、案件记忆等核心能力,测试与文档质量高。用户已完成一次**结构重构**(engine → research_agent 包),但 R2 复审确认:重构是结构迁移,**绝大多数已知缺陷原样迁入新代码**,并新增少量问题。
+1.3.2 已实现混合 RAG、有状态研究循环、引用校验、案件记忆等核心能力。R3(P0)/R4(P1 安全)/R5(P1 导入解析)修复已提交并配齐回归测试。但 R6 三审确认:
 
-**1.4.0 的目标:先把「会出错」的修掉,再把「能上生产」的补上。**
+1. **部分「已修复」项存在绕过、部署盲区或回归**,其中 2 项 P0 级(登录限流在文档化反代部署下失效或锁死全员;外法条号绑定可被标点/混合点名绕过)。
+2. **R5 的解析修复引入新缺陷**:「连续条号拯救」启发式会把折行引用幻化成虚假条文(静默数据污染);BOM/零宽字符/Unicode 行分隔符会静默合并条文。
+3. **R4 的 SSRF 收紧与项目自身文档化的部署形态冲突**:默认 `.env` 与 compose 组合会在启动期抛 ValidationError(发布阻断)。
+4. 工程健壮性(P1-15~P1-20)与重构遗留(N1~N5)基本原样未动,仅 P1-19 已由并行的局部修改完成。
 
-具体分三层:
-1. **P0 正确性/安全阻塞项**:修复会让错误法条通过校验、或让攻击者影响全员可用性的缺陷。
-2. **P1 安全加固与工程健壮性**:补齐部署安全基线、导入解析可靠性与后台任务状态机。
-3. **P2+ 产品能力**:评测体系、多租户、可观测性等面向真实业务的演进。
+**1.4.0 目标不变:先把「会出错」的修掉,再把「能上生产」的补上。** 但发布门槛改为:**先返工 8 项复核不合格项 + 4 项发布阻断,再谈 P2**。
 
-**非目标(本期不做)**:百万级文书搜索引擎、Book-to-Skill 蒸馏、真实法律准确率承诺、模型微调。
+**非目标(本期不做)**:百万级文书搜索引擎、Book-to-Skill 蒸馏、真实法律准确率承诺、模型微调、P3 多租户。
 
-## 2. 优先级总览(R2 复核后)
+## 2. 优先级总览(R6 三审后)
 
-| 优先级 | 主题 | 需求数 | 已修复 | 说明 |
+| 优先级 | 主题 | 需求数 | 三审核验 | 说明 |
 |---|---|---|---|---|
-| P0 | 正确性与安全阻塞项 | 6 | **6(全部)** | R3 完成 P0-1~P0-6,均可发布 |
-| P1 | 安全加固 | 7 | **7(全部)** | R4 完成 P1-1~P1-7,部署安全基线 |
-| P1 | 导入/解析可靠性 | 7 | **7(全部)** | R5 完成 P1-8~P1-14,防止条文污染与静默丢失 |
-| P1 | 工程健壮性 | 6 | 1(部分) | 任务状态机、性能与韧性 |
-| P2 | 评测与可观测 | 5 | 0 | 建立可量化的质量基线 |
-| P2 | 产品能力 | 6 | 0 | 检索增强、任务恢复、数据管理 |
-| P3 | 多租户与权限 | 5 | 0 | 独立里程碑,跨版本演进 |
-| 新增 | 重构引入的问题 | 5 | 0 | R2 发现,见第 10 节 |
+| P0 | 正确性与安全阻塞项 | 6 | 4 合格 / **2 需返工** | P0-2/3/5/6 合格;P0-1 部署盲区、P0-4 多法绕过 |
+| P1 | 安全加固 | 7 | 5 合格 / **2 需返工** | P1-3~P1-7 合格;P1-1 告警被默认值吞、P1-2 CGNAT 网段 + 存量配置不重校验 |
+| P1 | 导入/解析可靠性 | 7 | 3 合格 / **4 需返工** | P1-10/12/13 合格;P1-8/9/11/14 有缺口,且 P1-9 引入数据污染级新缺陷 |
+| P1 | 工程健壮性 | 6 | 1 已修复 / 1 部分 / 4 未修复 | P1-19 已修复;P1-18 预算已做、重试未做;P1-15/16/17/20 未修复 |
+| 新增 | 三审·发布阻断 | 4 | 0 | R6-S6 启动崩溃、R6-S1 限流豁免、R6-S2 反代锁死、R6-S14 文档化地址被拒 |
+| 新增 | 三审·安全部署 | 10 | 0 | R6-S3~S13(见 §14) |
+| 新增 | 三审·导入解析 | 13 | 0 | R6-P1~P13(见 §14) |
+| 新增 | 三审·研究引擎/前端 | 14 | 0 | R6-E1~E14(见 §14) |
+| P2 | 评测与可观测 | 5 | 0 | 保留 |
+| P2 | 产品能力 | 6 | 0 | 保留 |
+| P3 | 多租户与权限 | 5 | 0 | 独立里程碑 |
 
 ---
 
 ## 3. P0:正确性与安全阻塞项
 
-### P0-1 登录限流按身份隔离,禁止匿名锁死全员 【已修复】
+### P0-1 登录限流按身份隔离,禁止匿名锁死全员 【需返工:部署盲区】
 
-**现状**:`app/auth.py:48-54` 以 `request.client.host` 为限流键;`app/main.py:122` 传 client.host;`Dockerfile:15` 以 `--no-proxy-headers` 启动。反代部署时所有用户共享代理 IP,任何匿名者连续 10 次错密码,全员(含管理员)10 分钟无法登录,且可反复触发。
+**原修复**(R3,代码已确认):`app/auth.py:51-83` 按地址 10 次失败/10 分钟硬限流;全局匿名失败 60 次/10 分钟改 2 秒节流(正确密码仍可登录);回环地址完全豁免并计入本地恢复通道。`app/main.py:140-150` 开 `LEXCITE_TRUST_PROXY=1` 取 XFF 最后一跳,未开则忽略 XFF。
 
-**需求**:
-- 限流键双层:账号(或账号+IP)+ 全局匿名请求限额。
-- 反代场景支持 `--proxy-headers --forwarded-allow-ips`,仅信任已知代理的 XFF。
-- 管理员账号免于被全局限额锁死(或提供本地恢复通道)。
+**R6 三审发现(发布阻断,两个方向都坏)**:
+- **R6-S1【高】回环豁免使文档化反代部署无限爆破**:`docs/DEPLOYMENT.md:157-164` 的 nginx 样例代理到 `127.0.0.1:8080` 且**不设 X-Forwarded-For**、不提 TRUST_PROXY;`auth.py:53,56,60-61,74` 将所有请求视作 loopback → 不计失败、无限流、不节流 → 远程攻击者可无限次 scrypt 撞库(每次 ~16MB 内存,单 worker DoS)。若开 TRUST_PROXY 而代理不覆盖客户端 XFF,攻击者伪造 `X-Forwarded-For: 127.0.0.1` 同样获得豁免。
+- **R6-S2【高】默认部署复现原锁死症状**:compose 默认 `LEXCITE_TRUST_PROXY` 为空,反代后所有客户端共享 Docker 网关 IP → 10 次匿名失败仍锁死全员 10 分钟(即原 P0-1 缺陷)。
+- **R6-S3【中】uvicorn 0.53 默认 `proxy_headers=True`**(信任 127.0.0.1/::1):Dockerfile:15-18 移除 `--no-proxy-headers` 后,回环反代场景下 uvicorn 会先于 `client_address()` 解析可伪造的 XFF,与「无信任即忽略 XFF」的承诺及 Dockerfile 注释不符。
+- 测试缺口:`test_forged_xff_ignored_without_trusted_proxy`(test_auth.py:38-43)每次请求都带同一个伪造 XFF,限流键恒定,无法检测信任回归;`test_loopback_recovery_channel`(46-50)只产生 10 次失败且直调 login,未真正走恢复路径(应先填满 GLOBAL_FAILS≥60 再断言回环可登录)。
 
-**修复**(R3):
-- `app/auth.py:login()`:按地址 10 次失败/10 分钟硬限流只封锁被撞的地址;全局匿名失败满 60 次/10 分钟改为 2 秒节流,正确密码仍可登录(只变慢,不拒绝);`127.0.0.1`/`::1` 完全豁免,作为本地恢复通道。
-- `app/main.py:client_address()`:`LEXCITE_TRUST_PROXY=1` 时取 XFF 最后一个跳(可信代理实际看到的来源,早段是客户端可伪造的);未开信任时 XFF 整体忽略。Dockerfile 移除 `--no-proxy-headers`(uvicorn 侧不再解析,XFF 统一由应用按信任开关处理);compose.yaml 增加 `LEXCITE_TRUST_PROXY` 与配置说明(代理须追加/覆盖 XFF)。
+**返工需求**:
+- 回环豁免改为显式开关(如 `LEXCITE_LOCAL_RECOVERY=1`,默认关);**绝不把 XFF 派生的地址视为 loopback**。
+- 全局节流改非阻塞(429 + Retry-After),不用 `time.sleep(2)` 占线程池(R6-S9)。
+- ATTEMPTS 表有界(定时清理/上限),防内存无界增长(R6-S10)。
+- nginx 样例补 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for` 并注明「代理必须覆盖客户端 XFF」;`.env.example` 补 `LEXCITE_TRUST_PROXY`(目前只有 compose.yaml 注释提及,R6-S4)。
+- Dockerfile 显式传 `--no-proxy-headers --forwarded-allow-ips=` 或文档化 uvicorn 默认行为与应用的差异。
+- 重写上述两条测试为可检测回归的形态。
 
-**验收标准**:
-- [x] 反代部署下,匿名者用错误密码撞库 30 次,不影响正确密码登录。`tests/test_auth.py::test_attacker_flood_does_not_block_other_clients`
-- [x] 单账号 10 次失败仍触发该账号 10 分钟限流。`tests/test_auth.py::test_account_limit_still_locks_flooded_address`
-- [x] `docker compose logs` 中不出现因 XFF 伪造导致的错误限流。未开信任时代理 XFF 被完全忽略、伪造 XFF 不改变限流键(`test_forged_xff_ignored_without_trusted_proxy`);另覆盖全局节流不锁死(`test_global_anonymous_cap_throttles_but_never_locks`)与本地恢复(`test_loopback_recovery_channel`)。
+**验收**:反代部署下 ① 匿名撞库 100 次不锁死其他用户、正确密码始终可登录;② 无 XFF 时攻击者伪造 XFF 不获得豁免;③ 单账号 10 次失败仍锁该账号;④ `test_forged_xff_ignored_without_trusted_proxy` 在删除信任逻辑后必红。
 
-### P0-2 模型密钥与端点绑定,端点变化即失效 【已修复】
+### P0-2 模型密钥与端点绑定,端点变化即失效 【合格,2 项残留】
 
-**现状**:`app/llm.py:134-142`。API 请求省略 `api_key` 字段时,旧密文无条件保留;修改 `base_url` 后旧云端密钥仍会发往新端点。前端 `static/app.js:197` 在地址变更时发 `""` 有部分规避,**但直接调 API 仍中招**。检索/搜索服务密钥需同步检查(`app/websearch.py:43-53` 已实现正确模式,可作为参照)。
+**R6 三审**:`app/llm.py:134-147` 三元组(profile, provider, base_url)绑定已确认,两个测试直接调 `save_settings`、有效。残留:
+- **R6-S5【中】环境密钥未绑端点**:`resolved()`(llm.py:163-172)在无密文时回退 `MODEL_CLOUD_API_KEY`/`MODEL_API_KEY`;改端点清空密文后,部署环境密钥仍发往新端点——与验收标准 2「resolved() 返回的密钥只来自与当前端点匹配的存储项」矛盾。测试仅因 `conftest.py:9-14` 删除全部 MODEL_* 环境变量而通过。
+- **R6-S6【低】旧配置过度清除**:无 `profile` 字段的存量配置在「端点实际未变」的保存中 `None != "local"/"api"` 被清密钥,与「存量密钥无需迁移」矛盾(settings() 推断 profile 在 llm.py:100-108)。
+- 需求中的「空字符串与省略字段行为一致」与实现(二者刻意不同)表述冲突,应修订需求表述。
 
-**需求**:
-- 密钥与 (profile, provider, base_url) 三元组绑定;任一变化即清除已存密钥。
-- 空字符串与省略字段行为一致(不再区分)。
-- 保存前对 base_url 做安全校验(见 P1-2)。
+**返工需求**:环境密钥同样按当前 (provider, base_url) 绑定——端点变化时不再回退环境密钥,或要求显式重新启用;补「端点改变后 resolved() 不含环境密钥」的测试(不删环境变量);对无 profile 的存量配置按推断 profile 比较。
 
-**修复**(R3):`app/llm.py:save_settings()` 与 websearch.py 对齐——三元组(profile, provider, base_url)不变且省略 `api_key` 时才保留旧密文,否则清空;显式 `""` 随时可清除。retrieval_services.py 已先行实现同模式(复查确认)。存量密钥无需迁移:端点不变继续有效,改端点即要求重新输入。
+### P0-3 修正轮检索词不再被截断丢弃 【合格】
 
-**验收标准**:
-- [x] 保存 base_url 为新值且不带 api_key 字段 → 旧密钥不随新端点发送。`tests/test_model_wire.py::test_endpoint_change_drops_stored_key`(直接调 `llm.save_settings`,不经前端)
-- [x] 测试连接/研究调用时,`resolved()` 返回的密钥只来自与当前端点匹配的存储项。同上 + `test_unchanged_endpoint_keeps_stored_key`
-- [x] 增加回归测试覆盖「改地址后密钥外泄」场景(直接调 API,不经前端)。已覆盖
+**R6 三审**:`app/research_agent/runner.py:271` plan.queries 位于 needs 展开之前,去重后 `[:9]`;测试 `test_repair_queries_survive_many_authorities`(test_agent.py:120-140)有效(旧排序下会截断)。注:PRD 行号 246/291 已过时,实际为 271/356。
 
-### P0-3 修正轮检索词不再被截断丢弃 【已修复】
+### P0-4 条号精确匹配必须绑定法规主体 【需返工:绕过】
 
-**现状**:`app/research_agent/runner.py:246`(240、291 亦同)。模型修正查询 `plan.queries` 拼接在 needs 展开之后,`[:9]` 截断。needs 累计 ≥8 条时修正查询全部被丢弃,第 2/3 轮只能重复旧检索。
+**原修复**(R3):`retrieval.py:165-171` 检测未入库点名(《》名称 + 裸名称紧邻第N条 + 后缀表 + 指代词过滤),命中即禁无主体条号精确匹配并告警。
 
-**需求**:
-- `plan.queries` 置于 needs 展开之前,或为修正查询单独预留名额。
-- 检索查询预算(去重后上限)在日志/进度中可核对。
+**R6 三审发现(实际执行 regex/query_laws 验证)**:
+- **R6-S7【高】标点分隔绕过**:「刑法:第264条」「(刑法)第264条」「解释(一)第3条」→ `foreign=[]`、`subject_bound=True` → 他法条号仍走精确通道。
+- **R6-S8【高】混合点名绕过**:「刑法第264条和民法典第577条」→ targets 含民法典、foreign 含刑法,但民法典第 264 条仍被精确匹配——「点名其他法规时禁止无主体条号匹配」未真正成立。告警照发但不生效。
+- **R6-S9【低】误报**:「根据民法典第577条」把「根据」并入法名(告警《根据民法典》);「合同规定第5条」被当外法;指代词表缺「本法典」「相关司法解释」;目录内但被复核/日期排除的法被报「未入库」(误导)。
 
-**修复**(R3):`app/research_agent/runner.py:246` plan.queries 移至 needs 展开之前(focus、事实问题、修正查询、needs 依次去重后取前 9);第 291 行 source_pass 追加逻辑不变,修正查询位置靠前不再被挤掉。检索计划在进度区「检索计划就绪」中原样可见。
+**返工需求**:精确条号与**就近法规名绑定**——每个条号挂到最近的法规名,无主体条号仅当查询未点名任何法规或单法库时才放行;未入库点名继续转「待补齐」提示;修正误报(排除连接词前缀、扩充指代词表);区分「未入库」与「已入库但复核/时效排除」。
 
-**验收标准**:
-- [x] needs=8 且 plan.queries=3 时,第 2 轮实际检索包含至少 2 条修正查询。`tests/test_agent.py::test_repair_queries_survive_many_authorities`
-- [x] 新增单测:多法源场景下第二轮检索词集合 ≠ 第一轮。同上(8 个合成法源 + 3 条修正查询)
+**验收**:「(刑法)第264条」在民法典单库 → 无 264 精确命中;「刑法第264条和民法典第577条」→ 民法典 577 精确命中、264 不得命中民法典 264 条;「根据民法典第577条」→ 法名不含「根据」;各配回归测试。
 
-### P0-4 条号精确匹配必须绑定法规主体 【已修复】
+### P0-5 条号/法规名比较统一规范化(article_key / law_key)【合格】
 
-**现状**:`app/research_agent/retrieval.py:159,172`。`len(unique_laws)==1` 时,查询中任意「第N条」都成为该法精确命中。仅导入《民法典》时问「刑法第264条」,民法典第 264 条被置顶。现有测试 `tests/test_integrity.py:78-83` 只覆盖「民法典第577条」带库内法名的情形,未覆盖裸条号/未知法名。
+**R6 三审**:`retrieval.py:161,246-248`、`verification.py:26,35-50` 均经 `article_key`/`law_key` 规范化;5 条回归测试有效(数字写法互认、之后缀互认且与基条隔离、裸名称绑定拒绝他法同号)。低危边角(记入 R6-P12):`num()` 混合数字误析(「第1百23条」→(100,0));「之零/之0」坍缩为 (n,0)。
 
-**需求**:
-- 查询点名其他法规(即使该法规未入库)时,禁止无主体条号匹配。
-- 仅当查询未点名任何法规、或点名法规与候选同法规时,条号才可精确加分。
-- 未入库法规的点名应转为「缺少法源」提示,而非错误召回。
+### P0-6 覆盖检查异常时旧结论与未复核新证据一起返回 【合格】
 
-**修复**(R3):`app/research_agent/retrieval.py:rank()` 新增「查询点名的未入库法规」检测(《》显式名称 + 裸名称紧邻条号模式,含法/条例/规定/办法/解释/规则/细则/决定/公约/通则/法典/典等后缀,过滤「本法/有关规定」等指代词);检测到未入库点名时禁止无主体条号精确匹配,并在检索警告中提示「查询点名了未入库法规:…请补录或核对法规名称」;法源缺口仍由模型 missing_authorities 流程转成「待补齐的法律依据」。
-
-**验收标准**:
-- [x] 单法库(民法典)下问「刑法第264条」→ 民法典 264 条不得进入精确匹配通道。`tests/test_integrity.py::test_foreign_law_reference_not_exact_in_single_library`
-- [x] 新增单测覆盖「点名他法 + 单法库」「裸条号 + 单法库」场景。同上(裸条号「第264条」仍精确命中,`exact` 通道可见)
-- [x] 回答显示「待补齐的法律依据:刑法」而非错误引用。检索警告点名「刑法」并要求补录;配合既有 missing_authorities 提示
-
-### P0-5 条号/法规名比较统一规范化(article_key / law_key)【已修复】
-
-**现状**:`app/research_agent/retrieval.py:161,236-238`、`verification.py:20,26-27`。`app/ingest.py:12` 已支持「之1」,但两处正则仍仅认中文数字;跨法引用展开与引用校验仍是原始字符串比较。导致:
-- 正文「本法第一百二十三条」与标题「第123条」不一致时,同法引用展开漏召回。
-- 「第134条之1」(阿拉伯数字+之)不互认,可误拒亦可误放行。
-- 裸名称「民法典第五百七十七条」(无书名号)可引用同号他法条文通过确定性校验。
-
-**需求**:
-- 所有条号比较(引用校验、同法展开、`之`后缀)统一经 `ingest.article_key` 规范化;`之` 后缀正则与 `ingest.ARTICLE` 对齐(接受阿拉伯+中文数字)。
-- 法规名匹配支持《》剥离后的裸名称,与法库 `law_key` 对齐。
-
-**修复**(R3):
-- `retrieval.py`:qnumbers/同法展开的「之」后缀正则改为 `之+NUM`(与 ingest.ARTICLE 对齐);同法展开改为 `article_key` 集合比较。
-- `verification.py`:条号校验经 `article_key` 规范化(数字写法不同不再误拒);《》名称经 `law_key` 规范化;新增裸名称绑定——结论中「法名+第N条」紧邻出现时,该 (法名, 条号) 必须存在于该法的引用证据中(runner 传入法库目录法名),否则拒绝。
-
-**验收标准**:
-- [x] 标题「第123条」+ 正文「本法第一百二十三条」→ 展开命中。`tests/test_integrity.py::test_cross_reference_expansion_normalized`
-- [x] 「第134条之1」与「第134条之一」互认,且与第134条不互认。`test_zhisuffix_arabic_chinese_interop`(检索)+ `test_zhisuffix_verification`(校验)
-- [x] 引用「民法典第五百七十七条」→ 只能匹配民法典第 577 条,不匹配他法。`test_bare_law_name_binding`;另 `test_claim_article_numeral_forms_normalized` 覆盖数字写法互认
-- [x] 上述场景各有一条回归测试。已各配至少一条
-
-### P0-6 ~~覆盖检查异常时旧结论与未复核新证据一起返回~~ 【已修复】
-
-**现状**:已随重构修复。`app/research_agent/runner.py:216-221,271-274`:新增官方文本或证据 id 变化即清空 claims/citations/verification;异常路径只经 finish 返回当前已复核结论。旧 assess 逻辑已删除。
-
-**验证**:`tests/test_agent.py:46-68` 的「先批准→新增→失败」测试有效。
+**R6 三审**:`runner.py:223-226` 新证据即清空 claims/citations/verification;`302-313` 按 evidence_key 变化清空;所有退出路径经 `finish()`;test_agent.py:46-68 有效(移除清空逻辑必红)。
 
 ---
 
 ## 4. P1:安全加固
 
-### P1-1 会话 Cookie 安全默认 【已修复】
+### P1-1 会话 Cookie 安全默认 【需返工(小)】
 
-**现状**:`app/main.py:124` 仍仅 `LEXCITE_SECURE_COOKIE=="1"` 才设 Secure,compose 默认 0。
+**R6 三审**:`main.py:134-137` 判定正确、login 已用;但 `main.py:36` 告警条件 `not _cookie_secure() and not os.getenv("LEXCITE_SECURE_COOKIE")`——compose.yaml:12 与 .env.example:8 出厂默认 `"0"` 为 truthy → **默认部署恰好抑制了告警**。测试 test_security.py:32-38 删除了环境变量,未覆盖出厂值。
 
-**需求**:`LEXCITE_PUBLIC_URL` 为 https 时强制 Secure;以 http 启动且非 loopback 绑定时打印告警;部署文档补充 HSTS 配置。
+**返工**:改为 `if not _cookie_secure():`(告警文案保留补救开关提示);测试用 `LEXCITE_SECURE_COOKIE=0` 断言告警出现。另 R6-S10:早期 400/401/403/413 响应跳过安全头与 Cache-Control 处理(main.py:50-79 vs 80-86),建议统一响应助手。
 
-**修复**(R4):`app/main.py:_cookie_secure()` 统一判定——`LEXCITE_SECURE_COOKIE=1` 或 `LEXCITE_PUBLIC_URL` 以 `https://` 开头即设 Secure;lifespan 在 Cookie 未 Secure 时输出告警日志并提示补救开关。login 路由改调该助手。HSTS 属反代配置,写入部署提示(compose 注释/告警文案)。
+### P1-2 模型/检索/搜索端点 SSRF 防护 【需返工】
 
-**验收标准**:
-- [x] PUBLIC_URL=https 且 LEXCITE_SECURE_COOKIE=0 → Cookie 仍带 Secure。`tests/test_security.py::test_cookie_secure_when_public_url_https`
-- [x] LEXCITE_SECURE_COOKIE=1 → Secure;默认(两者皆无)→ 不带。`test_cookie_secure_when_flag_set`、`test_cookie_not_secure_by_default`
-- [x] 告警可见于日志。`test_startup_warns_when_cookie_not_secure`
+**R6 三审**:`models.py:112-127` 校验器与三个入口共用已确认;畸形地址、十进制/十六进制 IP、`[::ffff:169.254.169.254]`、nip.io/sslip.io、IDN、userinfo/query/fragment、重定向、代理头均被拦(实测)。缺口:
+- **R6-S11【中】100.64.0.0/10(CGNAT/Tailscale)六谓词全过**:`http://100.100.100.100/v1` 与 `[::ffff:100.64.0.1]` 被放行(Python 3.12 实测)。修复:拒绝 `not ip.is_global`(与 `sources.py:44` 一致),保留命名白名单。
+- **R6-S12【中】存量配置加载不重校验**:`llm.py:96-113`、`retrieval_services.py:59-76`、`websearch.py:14-25` 合并 stored 时不再过校验器;实测存量私有端点(127.0.0.1:9999 等)调用期照用。修复:合并后统一重校验。
+- **R6-S13【高,与 R6-S14 同根】默认 .env 组合在启动期抛 ValidationError**(详见 §14 R6-S6/R6-S14):`retrieval_services.py:59-76` 对 `RERANKER_PROVIDER=none` 仍无条件 `Service.model_validate(env_values)`,而 `.env.example:33` 出厂 `RERANKER_BASE_URL=http://reranker:8081/v1`、start.sh:9 自动复制 .env、compose.yaml:37-38 透传 → 组合部署(reranker 解析为内网 IP)时 `indexing.init()`(main.py:39)→ `start()`(indexing.py:244-249)→ `settings()` 抛 ValidationError → **容器无法启动/重启循环**;即使未用组合部署,`/api/status` 等入口也 400。修复:provider=='none' 时不校验 endpoint;或把文档化服务名 reranker/searxng 纳入白名单。
+- DNS 重绑定残余窗口(保存期解析、调用期不钉扎)仍为记录在案的边界(§13)。
 
-### P1-2 模型/检索/搜索端点 SSRF 防护 【已修复】
+**验收**:100.64.0.0/10 与 IPv6 映射形式被拒;`Service(provider='none', base_url='http://reranker:8081/v1')` 不抛异常;存量子私有端点配置在加载时被拒并提示重配;compose.reranker.yaml 组合冒烟启动成功(并入发布门槛 3)。
 
-**现状**:`app/models.py:96` 仍仅拦 `169.254.169.254` 与 `metadata.google.internal`;127.0.0.1、内网段、IPv6 均放行;「测试连接」可探测内网,`app/llm.py:291` 回显错误 JSON 构成半盲 SSRF。
+### P1-3 鉴权前不再缓冲大请求体 【合格,2 项残留】
 
-**需求**:解析 base_url 后拒绝私有/回环/链路本地/元数据网段(含 IPv6 映射);连接钉扎解析后 IP;本地 Ollama 走显式白名单(host.docker.internal / ollama 服务名)。
+**R6 三审**:中间件顺序(X-Lexcite → Origin → 鉴权 → Content-Length → 流式封顶)与 8MB/20MB 双档已确认,两条测试有效。残留:① `/api/login`、`/api/setup` 免鉴权仍可缓冲至 8MB,且 FastAPI 422 会**回显全部输入**(实测 7MB 响应)——建议这两路由独立 16KB 上限 + RequestValidationError 处理器不回显输入(R6-S8);② 中间件对 /api/extract 放行 22MB 而路由上限 20MB,不一致,统一为 20MB。
 
-**修复**(R4):`app/models.py` 重写端点校验——urlsplit 拒绝非 http(s)/带凭据/带 query/fragment 的地址;主机名不在白名单 `localhost`/`host.docker.internal`/`ollama` 时,对主机名与 DNS 解析结果逐 IP 判 `is_private/is_loopback/is_link_local/is_reserved/is_multicast/is_unspecified`(IPv4 映射 IPv6 先归一),命中即拒绝并说明本地模型应使用白名单服务名;保存期解析失败不拦截,调用期 DNS 重绑定的残余窗口记录为边界风险(§13,后续可加请求期钉扎)。`SearchSettingsInput` 与 `retrieval_services.Service` 共用同一校验器,三个保存入口同防护。
+### P1-4 数据文件权限收紧 【合格】
 
-**验收标准**:
-- [x] base_url=http://127.0.0.1:9000、http://[::1]、169.254.169.254、10.x、192.168.x、0.0.0.0、metadata.google.internal → 保存被拒绝并给出原因。`tests/test_security.py::test_endpoint_blocks_private_loopback_reserved`
-- [x] 白名单 localhost/host.docker.internal/ollama 及公网域名可保存。`test_endpoint_allows_named_local_hosts_and_public`
-- [x] 检索服务端点同防护;带凭据/query/非 http(s) 的畸形地址被拒。`test_retrieval_settings_endpoint_blocked`、`test_endpoint_rejects_malformed_urls`
+**R6 三审**:目录 0700、DB/WAL/SHM 0600、secret.key 0600 均已实测确认。残留(低):已存在的 secret.key 打开时不重新 chmod(llm.py:152-160),建议 open 时纠正(R6-S9)。
 
-### P1-3 鉴权前不再缓冲大请求体 【已修复】
+### P1-5 初始化码不出现在 stdout 【合格,文档欠账】
 
-**现状**:`app/main.py:53-65` 中间件在鉴权依赖之前读满 22MB body,未登录者可反复 POST 大包耗尽单 worker 内存。
+**R6 三审**:端到端确认——只打印 `data/setup-code.txt` 路径,文件 0600、setup 后删除。**文档欠账(发布阻断级体验问题,R6-E14)**:README.md:30、docs/DEPLOYMENT.md:25、start.sh:14、start.bat:17 与 HTML 教程仍让用户「从日志复制初始化码」;Docker 用户照旧流程将无法完成首次初始化。修复:README/start 脚本/教程统一改为「`docker compose exec lexcite cat data/setup-code.txt`(或宿主机直读 data/setup-code.txt)」。
 
-**需求**:鉴权失败时提前断开(401 优先于 body 解析,用 Content-Length 预判);体上限降至合理值(如 8MB);文档建议反代限制并发与 body。
+### P1-6 Origin 白名单不依赖 Host 头 【合格】
 
-**修复**(R4):`app/main.py` 中间件重排——X-Lexcite → Origin → 鉴权(401)之后才读 body;`/api/login`、`/api/setup` 为仅有的免鉴权 POST(与路由依赖一致)。通用上限降为 8MB,`/api/extract` 保留 20MB 文件预算;Content-Length 预判与流式封顶同用该值。
+**R6 三审**:PUBLIC_URL 固定白名单、回退路径 + SameSite=Strict + X-Lexcite 主防线已确认;两条测试有效;未发现 CSRF 绕过(无 CORS,跨源带自定义头请求预检即失败)。
 
-**验收标准**:
-- [x] 未登录 POST 9MB → 401 且不触发完整 body 解析(非 413)。`tests/test_security.py::test_unauthenticated_large_post_rejected_before_body`
-- [x] 已登录 POST 9MB → 413 并提示 8MB 上限。`test_authenticated_oversize_post_413`
+### P1-7 前端链接渲染仅允许 http/https 【合格】
 
-### P1-4 数据文件权限收紧 【已修复】
-
-**现状**:`app/db.py:20-28` 数据目录 0755、SQLite 0644;直接 Python 部署且主机多用户时案卷可被他人直读。
-
-**需求**:数据目录 0700、DB/WAL/SHM 0600;启动时自动纠正既有权限;`secret.key` 保持 0600。
-
-**修复**(R4):`app/db.py`——`data_dir()` 每次调用后 chmod 0700;`connect()` 打开库文件后 chmod 0600;`init()` 在 WAL 模式生效后对 `-wal`/`-shm` 侧车文件 chmod 0600(懒创建即启动时自动纠正既有权限)。`secret.key` 原有 0600 创建逻辑保持。
-
-**验收标准**:
-- [x] `ls -l data/` 与 `lexcite.sqlite3` 权限符合(0700/0600),WAL/SHM 存在时同样 0600。`tests/test_security.py::test_data_files_restricted_permissions`
-
-### P1-5 初始化码不出现在 stdout 【已修复】
-
-**现状**:`app/auth.py:34` 初始化码打印到 stdout,未初始化期间每次重启重印;能读日志者可在管理员之前抢占初始化。
-
-**需求**:初始化码写入一次性文件(已 0600),从日志移除;改为首次部署时提示「初始化码见 data/setup-code.txt」。
-
-**修复**(R4):`app/auth.py:init()` 不再拼接输出码值,改为提示「初始化码已写入 data/setup-code.txt(仅部署管理员可读)」;文件创建 0600、setup 成功后删除的流程不变。
-
-**验收标准**:
-- [x] 启动 stdout 包含 setup-code.txt 提示、不含码值本身(对照文件内容断言)。`tests/test_security.py::test_setup_code_not_leaked_to_stdout`
-
-### P1-6 Origin 白名单不依赖 Host 头 【已修复】
-
-**现状**:`app/main.py:48` 白名单仍由 `request.base_url`(Host 头)推导(另加 PUBLIC_URL);反代透传任意 Host 时可绕过。
-
-**需求**:白名单以 `LEXCITE_PUBLIC_URL` 为固定来源;Host 头与 PUBLIC_URL 不符时拒绝或忽略 Origin 校验走 SameSite 主防线。
-
-**修复**(R4):`app/main.py` 中间件——设置了 `LEXCITE_PUBLIC_URL` 时白名单固定为该值(Host 头无法加宽);未设置时(单机本地部署)回退 `request.base_url`,并保留 SameSite=Strict + X-Lexcite 自定义头主防线。
-
-**验收标准**:
-- [x] PUBLIC_URL 下伪造 Origin 的跨站写请求 → 403「请求来源不匹配」;同源 Origin → 200。`tests/test_security.py::test_origin_mismatch_rejected_when_public_url_set`
-- [x] 未设 PUBLIC_URL 的本地部署行为不变(同源 Origin 通过)。`test_origin_ok_without_public_url`
-
-### P1-7 前端链接渲染仅允许 http/https 【已修复,低危防御纵深】
-
-**现状**:`static/app.js:108` 搜索结果 URL 经 `esc()` 后直接渲染为 `<a href>`,未校验 scheme。**R2 复核补充**:`app/websearch.py:110-115` 入库前经 official_url 限制 https+gov.cn/npc.gov.cn,**新数据无法注入**;且 CSP 可挡 `javascript:` 执行。剩余风险仅存在于历史数据/库被篡改场景,属防御纵深。
-
-**需求**:渲染前校验 `new URL(...).protocol` 为 http/https;非 http(s) 降级为纯文本。
-
-**修复**(R4):`static/app.js` 新增 `safeHref()`(相对 `location.origin` 解析 `new URL(...).protocol`,仅放行 http/https,异常返回 null);web 来源列表、正文来源链接、修正案依据链接三处渲染统一经它过滤,非 http(s) 降级为纯文本标题且不渲染导入按钮。`tests/browser_sources.cjs` 增加注入 `javascript:alert(1)` 来源的断言(无 `a[href^="javascript:"]`、标题可见为纯文本、正常 https 链接保留)。
-
-**验收标准**:
-- [x] 构造 javascript: 协议的搜索结果 → 页面显示为不可点击文本;https 链接不受影响。`tests/browser_sources.cjs`(需 Playwright 浏览器环境,本机 `node --check` 通过)
+**R6 三审**:`safeHref()`(app.js:17)三处渲染点(:84/:85/:112)已确认;browser_sources.cjs:26-28 有 javascript: 注入断言。残留(低,防御纵深):内插点 app.js:59,86,117,235 的服务端值未转义(当前为枚举/整数/UUID 不可利用),建议统一 `esc()`(R6-S13)。
 
 ---
 
-## 5. P1:导入/解析可靠性 【已修复,R5】
+## 5. P1:导入/解析可靠性
 
-### P1-8 章节行污染上一条正文 【已修复】
+### P1-8 章节行污染上一条正文 【需返工】
 
-**现状**:`app/ingest.py:90` 章节行污染上一条正文;一条文同时收尾「节」和「章」时只剥离第一个标题行。
+**R6 三审**:`STRUCTURAL_HEADING`(ingest.py:17)与 body 全量剥离、heading_path 记录均确认,3 条测试通过。缺口:
+- **R6-P4【中】带句读标题不识别**:`[^\n。；;]+` 导致「第一章 总则。」「第一章 总则;附则」不剥离、残留上一条文(实测);「第 一 章」(空格)完全不识别。
+- **R6-P3【中高】误删折行引用**:「第二章 规定的程序适用」整行命中被从正文删除(实测数据丢失)。
+- **R6-P6【中】mark_headings 与 STRUCTURAL_HEADING 不同步**:indexing.py:66-72 的宽松正则把正文行「第二章规定的程序适用,依照前条规定」记成下一条文 heading_path;被 P1-9 拯救的标题反而丢 heading_path。
 
-**需求**:章节/分编行独立识别并从 body 剔除,记录 heading_path。
+**返工需求**:允许标题行结尾句读(限长)、容忍「第 一 章」空格;标题拒绝以 的/之/规定/所/中/内/和/与/至/到 开头;导出单一标题检测器供 ingest 与 indexing 共用(传偏移而非重推导)。
 
-**修复**(R5):`app/ingest.py` 新增行级正则 `STRUCTURAL_HEADING`——整行为「第N部分/编/章/节 + 可选标题」才命中,「第二章规定的」这类行内短语不匹配;每条 body 用 `STRUCTURAL_HEADING.sub` 剥离**所有**标题行(一条文可同时收尾节和章)。`app/indexing.py:mark_headings` 同步改用 `(部分|编|章|节)` 与层级映射 `{'部分':0,'编':1,'章':2,'节':3}`,导入时记录 heading_path(检索头与目录用)。
+### P1-9 引用启发式吞真实条标题 【需返工:引入数据污染级缺陷】
 
-**验收标准**:
-- [x] 连续两个结构标题行都从 body 剔除。`tests/test_import_quality.py::test_multiple_structural_headings_stripped_from_body`
-- [x] 「第一部分 总则」不残留「分 总则」。`test_part_heading_stripped`
-- [x] heading_path 随导入记录。`test_heading_path_recorded_on_import`
+**R6 三审**:「后行连续条号→优先按条号断」已实现,3 条测试通过。但:
+- **R6-P2【高】幻化虚假条文**:取消判定只看下一个条号是否连续,**不看当前行是否为标题形态**。「第一条 依照《中华人民共和国合同法》\n第二条之规定,处理。\n第三条 正文三。」→ 生成假「第二条」(正文「之规定,处理。」),cross_reference_count=0、零警告。**这是静默数据污染**。
+- **R6-P7【中】导入路径丢弃警告**:`import_law` 用 `parse_articles`(ingest.py:120-121,129),cross-reference 警告仅在 /api/laws/preview 可见;API/自动化导入的歧义文本零提示入库。
 
-### P1-9 引用启发式吞真实条标题 【已修复】
+**返工需求**:取消引用判定须同时满足「当前行具标题形态」(条后紧跟空白/短标题、不以 的/之规定/所…/第N款 开头)+「后行连续条号」;取消时发告警;import_law 改用 `analyze_articles` 并在响应/审计中返回警告与 cross_reference_count。
 
-**现状**:`app/ingest.py:42-57,75-80` 引用启发式吞真实条标题——上一行以引用引导语结尾时,下一行行首条号被并入上一条文。
+### P1-10 SHA256 不可审计 【合格】
 
-**需求**:后文为清晰条号模式时优先按条号断;疑似误并边界显式告警。
+**R6 三审**:law_snapshots 表(indexing.py:20)、`zlib.compress(提交原文)`、UTF-8 SHA-256 口径、`GET /api/laws/{id}/hash-check`(main.py:377-392,已鉴权,401 验证)、前端「重算校验」按钮(app.js:85)均确认,3 条测试通过。措辞差异:按钮文案「重算校验」vs PRD「存档重算」(低);损坏快照 zlib 异常 → 500 无提示(低),建议返回明确错误。
 
-**修复**(R5):`analyze_articles` 先按 `_reference_reason` 标注疑似引用;若后一行行首条号**连续**(第N条→第N+1条,或第N条→第N条之一),视为真实标题序列,取消引用判定、优先按条号断;仍判为引用的保留在所属条文中并计入 cross_references 与警告,不静默合并。
+### P1-11 PDF/DOCX 静默丢失+阻塞事件循环 【需返工:DOCX 仍丢内容】
 
-**验收标准**:
-- [x] 引用引导语结尾 + 后续连续条号 → 拆分正确。`test_lead_in_line_with_consecutive_numbers_prefers_split`
-- [x] 「办理下列事项,依照下列规定\n第二条…」→ 拆分。`test_acceptance_lead_in_splits`
-- [x] 歧义引用保留在正文并告警。`test_ambiguous_reference_kept_with_warning`
+**R6 三审**:PDF 按页提取 + 扫描件拒绝(>50% 空页)+ OCR 提示、DOCX 正文顺序遍历、`run_in_threadpool` 均确认。缺口:
+- **R6-P9【中】DOCX 仍静默丢失**:嵌套表格(cell.add_table)、`w:sdt` 内容控件、文本框、首页/偶数页页眉、页眉页脚中的**表格**均不遍历(实测文本缺失);合并单元格重复输出(按网格列取同一 cell)。
+- **R6-P13【低-中】PDF 无解压体积上限**:pypdf 解压流无聚合输出上限(页数 1500 与上传 20MB 已限,但压缩炸弹可膨胀到 GB 级内存),建议输出字符总量上限或子进程隔离。
+- 测试 `test_extract_endpoint_accepts_docx_off_event_loop` 只断言 200 与文本,未验证线程池——补「不阻塞事件循环」断言或改代码审查注记。
 
-### P1-10 SHA256 不可审计 【已修复】
+**返工需求**:递归遍历 p/tbl/sdtContent(含单元格与全部页眉页脚变体),合并单元格按底层 tc 去重;新增嵌套表格/内容控件/页眉表格测试;PDF 加解压后字符总量上限。
 
-**现状**:`app/ingest.py:118-127` SHA256 不可审计——哈希对象与口径不明确,入库后无法重算。
+### P1-12 联网阻断未套复核周期/辖区 【合格】
 
-**需求**:保存压缩原文快照;统一哈希对象;引用卡片提供重算入口。
+**R6 三审**:`authorities.py:228-236` 复用 corpus 口径(名称+辖区+有效期重叠+review_days 截止),不满足时降级警告并纳线上版本为临时证据;2 条测试有效。边角(低):多版本重叠时 stale 版先警告、fresh 版后阻断的顺序噪音。
 
-**修复**(R5):`ensure_schema` 新增 `law_snapshots(law_id, content BLOB)`;`import_law` 存 `zlib.compress(提交原文)`(口径:导入时提交的原始正文按 UTF-8 取 SHA-256,未做规范化或拆分);新增 `GET /api/laws/{id}/hash-check` 从存档重算并与卡片哈希比对;引用卡片(前端 `showCitation`)提供「存档重算」按钮,重算一致/不一致分别显示;上线前导入的旧数据无快照时明确提示可重新导入。
+### P1-13 重复导入无查重 【合格,2 项残留】
 
-**验收标准**:
-- [x] 快照重算 == 存储 sha256 == 原文 UTF-8 SHA256。`test_snapshot_recompute_matches_stored_hash`
-- [x] 存档为压缩的提交原文。`test_snapshot_is_compressed_original`
-- [x] 无快照时 hash-check 报告 snapshot_missing。`test_hash_check_without_snapshot_reports_missing`
+**R6 三审**:(name, version, jurisdiction) 查重返回已有记录、前端 toast+打开已有法规均确认,2 条测试有效。残留:① 查重在 `parse_articles` 之后(ingest.py:129)——重复身份 + 坏文本返回解析 400 而非已有记录,查重应前移;② SELECT→INSERT 非原子,并发导入仍可撞 UNIQUE 出 409(main.py:100-102 兜底文案还会误导),建议 ON CONFLICT DO NOTHING + 回读。
 
-### P1-11 PDF/DOCX 静默丢失+阻塞事件循环 【已修复】
+### P1-14 Markdown 标记破坏拆条 【需返工】
 
-**现状**:`app/ingest.py:149-160`、`app/main.py:340-347` PDF/DOCX 静默丢失+阻塞事件循环——PDF 只取首页、DOCX 只取段落,解析在事件循环内同步执行。
+**R6 三审**:单字符标记剥离与编码顺序确认,3 条测试通过。缺口(R6-P10):多字符标记仍破坏拆条——「**第一条** 正文一。」剩「*第一条**」,**第一条不识别且导入静默成功(仅剩第二条,零警告)**;有序列表(1.)、引用块(>)、嵌套标记、7+ 个 # 未覆盖;.txt 被 utf-8-sig 剥 BOM(与「原样返回」矛盾)。
 
-**需求**:按页空文本比例/耗时拒绝可疑文件;解析移入线程池;DOCX 合并表格/页眉页脚。
-
-**修复**(R5):PDF 按页提取,空页(归一化后 <5 字)占比 >50% 判定扫描件特征直接拒绝并提示 OCR;DOCX 按 document body 顺序遍历段落与表格(单元格段落并入),再合并页眉页脚,不静默丢内容;`/api/extract` 解析移入 `run_in_threadpool`。
-
-**验收标准**:
-- [x] 扫描件特征 PDF → ValueError 并提示 OCR。`test_scanned_pdf_rejected_with_clear_error`
-- [x] 文字型 PDF 全页提取。`test_text_pdf_extracts_all_pages`
-- [x] DOCX 表格/页眉并入且顺序正确。`test_docx_includes_tables_and_headers`
-- [x] 上传接口解析在线程池执行(不阻塞事件循环)。`test_extract_endpoint_accepts_docx_off_event_loop`
-
-### P1-12 联网阻断未套复核周期/辖区 【已修复】
-
-**现状**:`app/research_agent/authorities.py:223-225`(已迁入新包)阻断仅查 reviewed_at 真值——本地同名版本只要复核过就永远阻断联网补查。
-
-**需求**:复用 corpus 的 review_days 截止与辖区判定;不满足阻断条件时降级 warning。
-
-**修复**(R5):`authorities.acquire()` 本地同名版本检查复用 corpus 口径——名称匹配 + 辖区(全国或同辖区)+ 有效日期重叠 + reviewed_at 在 review_days 截止内才阻断;不满足时发出 source_read 警告「本地同名版本未阻断联网补查」,线上版本作为临时证据纳入。
-
-**验收标准**:
-- [x] 复核过期的本地同名版本不阻断联网补查,产生警告。`tests/test_source_resolution.py::test_stale_local_version_does_not_block_online_supplement`
-- [x] 已复核(在 review_days 内)的同名版本阻断补查,lead 提示「人工复核版本」。
-
-### P1-13 重复导入无查重 【已修复】
-
-**现状**:`app/ingest.py:117-127`、`app/db.py:61` 重复导入无查重——同一法规重复导入撞 UNIQUE 约束报错。
-
-**需求**:按 (name, version, jurisdiction) 查重,返回已有记录 ID。
-
-**修复**(R5):`import_law` 按 UNIQUE 约束同键身份查重,命中返回已有记录 `{duplicate:True, id, message:已存在法规…}` 而非 409;前端导入后 toast 提示并打开已有法规。同正文不同名称/版本属合法独立版本(版本重叠复核场景),不做 SHA256 兜底查重。
-
-**验收标准**:
-- [x] 同身份重复导入 → 返回已有记录且不新增行。`test_duplicate_import_returns_existing_record`
-- [x] 同正文不同元数据 → 独立导入。`test_same_text_different_metadata_imports_separately`
-
-### P1-14 Markdown 标记破坏拆条 【已修复】
-
-**现状**:`app/ingest.py:135-141` Markdown 标记破坏拆条——行首 `#`/`*`/`-` 使条标题无法识别。
-
-**需求**:提取时剥离行首 `#`、`*`、`-`;补测试。
-
-**修复**(R5):`extract_file` 对 .md 在拆条前剥离行首标记(含缩进);.txt 原样返回;编码依次尝试 utf-8-sig/gb18030。
-
-**验收标准**:
-- [x] Markdown 拆条与纯文本一致。`test_markdown_extraction_roundtrip_matches_plaintext_split`
-- [x] 行首标记剥离后条号可识别。`test_markdown_markers_stripped_before_split`
-- [x] .txt 内容不被触碰。`test_txt_content_untouched`
+**返工需求**:迭代剥离 `(?:#{1,6}|[*+-]+|>|\d+[.)])` 与尾部强调标记;.txt 路径不改动字节;BOM 剥离只用于 .md 解析。
 
 ---
 
-## 6. P1:工程健壮性
+## 6. P1:工程健壮性(R6 状态更新)
 
 ### P1-15 索引任务取消竞态终态化 【未修复】
 
-**现状**:`app/indexing.py:198-215`(未重构)。线程启动前 `_stop` 已置位时,worker 直接退出且不更新任务状态,任务永久 queued。
-
-**需求**:worker 的 finally 对非终态任务强制置 interrupted;提交与启动同锁。
-
-**验收**:提交后立即取消 → 任务最终进入 interrupted/failed,不残留 queued。
+`indexing.py:199` worker 在 `_stop` 已置位时直接退出,`finally`(:211-216)不强制终态;`cancel()`(:234-235)不加锁不写状态 → 提交后立即取消仍永久 queued,仅 init() 重启时修复。工作量:小。
 
 ### P1-16 研究任务取消检查去数据库化 【未修复】
 
-**现状**:`app/jobs.py:100-103` `cancelled()` 每次新建 SQLite 连接;`app/llm.py:238-239` 流式逐行调 control→check→cancelled,长思考流可产生上千次查询。jobs.py 本次重构仅改 import 别名。
+`jobs.py:100-103` `cancelled()` 每次新建 SQLite 连接;`llm.py:230-231,242-244` 流式逐块调控制检查 → 长思考流上千次查询。工作量:小(每任务 threading.Event + ≤1s 限频落库)。
 
-**需求**:内存 Event + 限频落库(如 1s 一次)。
+### P1-17 检索全表扫描下推与缓存 【未修复】
 
-**验收**:取消延迟 < 1s;流式期间 SQLite 查询次数与行数无关。
+`retrieval.py:51,53,87,105-106` 每轮多次 `SELECT *` + Python 过滤(law_id 过滤在 Python 侧),corpus 每轮调 3 次,无缓存。工作量:中。
 
-### P1-17 检索全表扫描下推与缓存 【未修复,已迁入新包】
+### P1-18 LLM 调用退避重试与墙钟预算 【部分修复】
 
-**现状**:`app/research_agent/retrieval.py:50-55,87-107`、`runner.py:267-269,289-292` 每轮多次 `SELECT * FROM laws/articles` 再 Python 过滤。
+**R6 复核**:墙钟预算已存在(llm.py:218-220 将 httpx timeout 压到剩余预算、runner.py:67-69 预算异常)。**未做**:429/5xx 无重试、不解析 Retry-After(check_status llm.py:305-330 立即抛 ModelError);无换行的字节流可绕过逐行检查拖到超时。工作量:中。
 
-**需求**:SQL 按 law_id/日期/辖区过滤,单次查询缓存复用。
+### P1-19 无新证据时提前结束研究 【已修复(PRD 原称部分)】
 
-**验收**:法库 5000 条时单轮检索 SQLite 读取行数明显下降(基线对比)。
+**R6 复核**:`runner.py:302-310` 按 `evidence_key(evidence)+evidence_key(collector.rows)` 相等即提前结束,**对 Plan=retrieve 生效**;test_agent.py:120-140 断言第 2 轮结束(model_calls=3)。残留:collector.attempted 仍未使用、无显式缺口 diff(仅去重键),加固项,小。
 
-### P1-18 LLM 调用退避重试与墙钟预算 【未修复】
+### P1-20 模型声明的缺失法源须经服务端判定 【未修复】
 
-**现状**:`app/llm.py:216-289` 单次 httpx 请求,无重试/退避,429/5xx 直接抛 ModelError;SSE 可拖到总时限。
-
-**需求**:限次重试(≤2)并尊重 Retry-After;单次调用受墙钟硬预算约束。
-
-**验收**:模拟 429 + Retry-After: 2 → 自动重试且总时长受控;SSE 挂起 → 到点强制中断。
-
-### P1-19 无新证据时提前结束研究 【部分修复】
-
-**现状**:`app/research_agent/runner.py:275` 已加入 `ids==last_ids` 时的 break,**但仅在证据为空或 Plan=clarify 时生效**;无「无新缺口」判定、未用 collector.attempted,Plan=retrieve 仍跑满轮(测试锁定 3 轮)。
-
-**需求**:按 collector.attempted / 缺口无变化判定无新证据即结束,覆盖 Plan=retrieve 路径。
-
-**验收**:全部缺口已尝试且无新候选 → 第 2 轮结束,不再空转第 3 轮。
-
-### P1-20 模型声明的缺失法源须经服务端判定 【未修复,已迁入新包】
-
-**现状**:`app/research_agent/runner.py:133-137,289`。先 gaps() 再按 law_key 把模型 explicit 项**无条件追加**为 not_retrieved;实际可用(已被 gaps 跳过)的法源也造假缺口并致 partial 状态。
-
-**需求**:explicit 项先经 authority_gaps 判定;仅真正缺失才进入缺口。
-
-**验收**:模型误报已存在法源 → 不产生假缺口、不触发联网读取。
+`runner.py:139-144` `update_gaps` 仍把模型 explicit 项在 gaps() 之后无条件追加为 not_retrieved;本地可用法源被 authority_gaps 跳过(检索.py:62-70)后被造假缺口 → 触发 partial 与不必要联网。工作量:小(explicit 先过 availability 判定)。
 
 ---
 
-## 7. P2:评测与可观测
+## 7. P2:评测与可观测(保留 v0.5 需求)
 
-### P2-1 法律评测集与 CI 门禁
+P2-1 法律评测集与 CI 门禁 / P2-2 调用级遥测 / P2-3 检索质量增强 / P2-4 任务恢复 / P2-5 备份归档校验。需求正文同 v0.5 §7,不再重复。
 
-**需求**:
-- 标注集扩展为「法规名称+版本+条号」粒度;至少覆盖:缺关键事实、虚构法条、过期法、新旧版本冲突、地区不符、通则与例外、遗漏司法解释、跨法规问题、提示注入、多轮记忆污染(现 `evals/README.md` 已列清单)。
-- 建立人工标注保留集(不参与提示词调整),由律师评阅 `human_legal_correctness` 与 `human_citation_entailment`。
-- CI 门禁:Recall@20 / MRR@20 / nDCG@10 回归告警;错引率、未支持结论率纳入报告。
+## 8. P2:产品能力(保留 v0.5 需求)
 
-**验收**:评测命令一键运行并输出 CI 可解析报告;指标回退自动失败。
+P2-6 批量导入与进度 / P2-7 法条变更追踪 / P2-8 区划层级 / P2-9 复核到期提醒 / P2-10 检索预算可配置。需求正文同 v0.5 §8。
 
-### P2-2 调用级遥测
+## 9. P3:多租户与权限(保留 v0.5 需求,独立里程碑)
 
-**需求**:记录每次 LLM/向量/重排/搜索调用的耗时、输入输出 token、费用估算、重试次数、http_status,聚合到研究任务与全局仪表。
-
-**验收**:单次研究结束后可查看逐调用账单明细;支持多模型成本对比。
-
-### P2-3 检索质量增强
-
-**需求**:
-- 分词归一:法规简称/旧称映射、繁简转换、同义扩展。
-- 维度漂移、复核过期、索引覆盖率从被动提示升级为设置页主动告警。
-
-**验收**:简称/繁体查询召回与全称一致(受控用例);告警在保存配置后 1 分钟内出现。
-
-### P2-4 任务恢复
-
-**需求**:服务重启后 interrupted 任务可手动续跑;续跑前展示将发生的模型调用次数与预估费用并二次确认。
-
-**验收**:研究进行中重启 → 恢复后任务显示「已中断,可续跑」;续跑不重复计费已完成的调用。
-
-### P2-5 备份归档校验
-
-**需求**:备份包带校验和与恢复演练说明;恢复前校验完整性。
-
-**验收**:篡改备份文件 → 恢复被拒绝。
+P3-1 用户与角色 / P3-2 案件权限 / P3-3 审计归属 / P3-4 认证增强 / P3-5 存储加密。正文与里程碑建议同 v0.5 §9。
 
 ---
 
-## 8. P2:产品能力
+## 10. 重构引入的问题(R6 状态更新)
 
-### P2-6 批量导入与进度
-
-**需求**:多文件批量导入、逐文件状态与失败重试、批量复核操作。
-
-### P2-7 法条变更追踪
-
-**需求**:修订对照视图(新旧版本 diff)、按事件日期自动选版(现仅冲突阻断)、变更通知。
-
-### P2-8 区划层级
-
-**需求**:省-市-区县层级表与跨层级适用规则;现为精确匹配。
-
-### P2-9 复核到期提醒
-
-**需求**:复核到期前 N 天在界面提示;逾期法规置顶于「需重新复核」队列。
-
-### P2-10 检索预算可配置
-
-**需求**:轮数/调用次数/搜索读取上限从硬编码改为按工作空间可配,并展示每次研究将消耗的预算。
+| 编号 | 严重度 | R6 核验 | 现状与需求 |
+|---|---|---|---|
+| N1 | 中 | 未修复,范围比 PRD 更大 | CoverageAudit 死分支另含 test_workflows.py:44/65/85、test_source_resolution.py:148(runner.py:367,384 本地构造,stage map :80 不可达)。清理死分支,按新流程重写覆盖步骤测试 |
+| N2 | 中 | 已解决 | R3/R4/R5 已配齐 14+14+19 条回归 |
+| N3 | 低 | 未修复 | runner.py:222-227 source_timing 仍在 finally:异常/取消/空 acquire 都发警告。emit 仅限实际新增来源,无新增标 skipped |
+| N4 | 低 | 未修复 | tests/browser_fixture_app.py:69 next() 无默认,空 evidence → StopIteration → 500。改 next(..., None) 并按空 evidence 返回缺失法源 |
+| N5 | 低 | 未修复 | schemas.py:60-66 Draft 全可选,错误阶段 JSON 静默成空 Draft(Plan/Verdict/Repair 被忽略)→ no_supported_answer 而非 model_error。加阶段判别或 extra='forbid' |
 
 ---
 
-## 9. P3:多租户与权限(独立里程碑)
-
-**背景**:当前单密码共享工作空间,同一密码可见所有案件(README、ARCHITECTURE 已承认)。
-
-- **P3-1 用户与角色**:独立用户、管理员/资料员/办案人员角色。
-- **P3-2 案件权限**:案件归属、可共享范围、跨用户访问控制。
-- **P3-3 审计归属**:审计记录操作者身份;登录成功/失败、导出、删除、设置变更全量记录;防篡改(哈希链或只追加存储)+ 查看入口。
-- **P3-4 认证增强**:密码修改与轮换、会话列表与远程注销、MFA/SSO 预留。
-- **P3-5 存储加密**:案件内容字段级加密(密钥轮换);当前仅 Fernet 保护模型密钥,且密钥与 DB 同卷。
-
-**里程碑建议**:M1 用户+角色+案件权限 → M2 审计 → M3 认证增强 → M4 加密。
-
----
-
-## 10. 重构引入的新问题(R2 发现)
-
-| 编号 | 严重度 | 位置 | 问题 | 需求 |
-|---|---|---|---|---|
-| N1 | 中 | tests/test_agent.py:75/99/116、test_core_research.py:193/213/315、test_memory_reasoning.py:72、tests/browser_fixture_app.py:55/67/73 | CoverageAudit 已改为本地构造,不再有独立模型调用,但测试仍保留 `schema is CoverageAudit` 死分支;覆盖步骤增删时这些测试仍绿,失去保护 | 清理死分支,按新流程重写覆盖步骤测试 |
-| N2 | 中 | tests/test_integrity.py:78-83 | P0-3/P0-4/P0-5/P1-12/P1-20 均无回归测试;现有测试只覆盖库内法名与中文「之一」 | 每个 P0/P1 修复配套至少一条回归测试(见各节验收标准)。R3:P0-1~P0-5 已配齐 14 条;R4:P1-1~P1-7 已配齐 14 条;R5:P1-8~P1-14 已配齐 19 条(见各节) |
-| N3 | 低 | app/research_agent/runner.py:221 | `source_timing` 置于 finally,异常、取消、同轮空 acquire 都会 emit;正常「补查无新增」在进度区显示为警告 | emit 仅限实际新增来源;无新增时标记 skipped |
-| N4 | 低 | tests/browser_fixture_app.py:69 | 无默认值的 `next()`;首个离线提问时 evidence 为空抛 StopIteration → 500(旧代码同样会崩,非新回归) | next(..., None) 或按空 evidence 返回缺失法源 |
-| N5 | 低 | app/research_agent/schemas.py | 错误阶段 JSON 静默解析为空 Draft,报 no_supported_answer 而非 model_error(迁移保留行为) | 阶段不匹配时显式报模型结构错误 |
-
-**重构质量结论(正面)**:context.py 与旧 case_state.py 函数字节码一致;authorities/retrieval/verification 仅导入层级差异;runner 各 helper 字节码一致;无循环依赖;文档与实现一致;测试未改弱(新增 9 项,memory 测试新增 usage 断言,source fixture 比原先严格)。
-
----
-
-## 11. 非功能需求
+## 11. 非功能需求(更新)
 
 | 项 | 要求 |
 |---|---|
 | 性能 | 单轮检索 SQLite 读取量较基线下降;5000 条法库单轮 < 2s(参考机) |
-| 安全 | 通过 P0/P1 全部验收;新增 SSRF/锁死/密钥外泄回归测试 |
-| 可观测 | 调用级遥测(P2-2);任务与索引状态无永久中间态 |
-| 兼容 | Python 3.12、Docker Compose 单 worker 不变;SQLite 迁移保持加列式,历史引用快照不改写 |
-| 文档 | DEPLOYMENT 补反代/HSTS/权限章节;USER_GUIDE 同步新功能 |
-
-## 12. 发布与验收
-
-1. **回归基线**:pytest 286 项全通过(R5 修复后,含 14 条 P0 回归 + 14 条 P1 安全回归 + 19 条 P1 导入解析回归)+ 59 项浏览器检查(其中 P1-7 新增 1 项注入断言)。
-2. **新增测试**:本 PRD 每个「验收标准」至少一条自动化测试;P0 与 P1 安全加固全部有测试(N2)。
-3. **真实服务冒烟**:发布前至少完成一次真实国产 API(聊天/向量/重排)+ 本地 Ollama 的端到端验证(1.3.x 验证记录明确未做过,此项为 1.4.0 发布门槛)。
-4. **法律评测**:P2-1 保留集跑通并记录指标;不承诺准确率,但报告必须可复现。
-5. **安全回归**:SSRF、锁死 DoS、密钥外泄、权限各一项负向测试。(R4 已配齐:test_security.py 14 项 + test_auth.py 5 项 + test_model_wire.py 2 项)
-
-## 13. 风险与边界
-
-- **SSRF 收紧与本地服务冲突(已解决)**:P1-2 白名单覆盖 localhost/host.docker.internal/ollama 三种既有部署形态;既有测试改用 localhost 模拟服务端,部署回归已排除。
-- **DNS 重绑定残余窗口**:P1-2 保存期校验通过后,调用期的 DNS 解析可能被重绑到内网地址;当前为记录在案的边界风险,后续迭代可加请求期 IP 钉扎(仅影响「运营商配置的域名被劫持/重绑」场景,非默认攻击面)。
-- **密钥绑定迁移**:P0-2 已按「端点不变自动保留、端点变化即清除」实现,存量密钥无需迁移;改端点后需重新输入密钥(前端提示见 P1 文档工作)。
-- **法律边界不变**:引用原文匹配与模型复核不保证法律结论正确;评测指标不构成「法律准确率」声明。
-- **单进程边界不变**:多租户(P3)落地前仍需单 worker + 线程锁模型,不引入分布式部署。
+| 安全 | P0/P1 全部返工项验收通过;SSRF/锁死/密钥外泄回归测试覆盖 R6-S 系列 |
+| 可观测 | 调用级遥测(P2-2);任务与索引状态无永久中间态(P1-15) |
+| 兼容 | Python 3.12、Docker Compose 单 worker 不变;SQLite 迁移保持加列式 |
+| 文档 | DEPLOYMENT 补反代/XFF/TRUST_PROXY/HSTS/权限章节(仍未做);README/start 脚本初始化码指引修正(R6-E14);版本号升 1.4.0、UPGRADE_1.4.0 编写 |
 
 ---
 
-## 附录 A:发现清单(两轮审查,R2 已逐项复核)
+## 12. 发布与验收(更新)
 
-| # | 严重度 | 位置(R2 当前) | 摘要 | 状态 | 对应需求 |
+1. **回归基线**:286 pytest + 70 浏览器断言全通过(含返工后新增回归)。
+2. **返工闭环**:§3~§6 全部「需返工/未修复」项完成并各配测试(R6-S/P/E 系列按优先级)。
+3. **真实服务冒烟(仍为发布门槛,尚未做)**:至少一次真实国产 API(聊天/向量/重排)+ 本地 Ollama 端到端验证;新增:compose.reranker.yaml 组合部署冒烟(验证 R6-S6 修复);反代部署冒烟(nginx + TRUST_PROXY,验证 P0-1 返工)。
+4. **法律评测**:P2-1 保留集跑通并记录指标。
+5. **安全回归**:SSRF(含 100.64/10)、锁死 DoS、密钥外泄、权限各一项负向测试。
+
+## 13. 风险与边界(更新)
+
+- **SSRF 收紧与本地服务冲突(复燃)**:v0.5 称已解决,R6 发现未解决——文档化的 reranker/searxng 服务名不在白名单,且默认 .env 在启动期崩溃(§14 R6-S6/R6-S14)。修复方向:provider=none 免校验 + 服务名白名单。
+- **DNS 重绑定残余窗口**:不变(记录在案)。
+- **密钥绑定迁移**:P0-2 环境密钥残留(§3 P0-2 返工需求)。
+- **解析器数据污染**:P1-9 的「连续条号拯救」可幻化虚假条文(R6-P2)——凡 R5 之后已导入的法规,建议在修复后对照原文重导入校验。
+- **法律边界不变**;**单进程边界不变**。
+
+---
+
+## 14. 三审新增发现(2026-10-17,R6)
+
+### 14.1 安全与部署(R6-S)
+
+| 编号 | 严重度 | 位置 | 问题 | 修复方向 |
+|---|---|---|---|---|
+| R6-S1 | 高·发布阻断 | auth.py:53,56,60-61,74 + DEPLOYMENT.md:157-164 | 回环豁免 + 文档化同机反代(无 XFF)→ 全部客户端视为 127.0.0.1 → 无限爆破 + scrypt DoS;TRUST_PROXY 下伪造 XFF 同效 | 回环豁免改显式开关;不认 XFF 派生 loopback;文档/nginx 样例修正 |
+| R6-S2 | 高·发布阻断 | compose.yaml:18 + DEPLOYMENT.md nginx 样例 | 默认部署无 TRUST_PROXY → 客户端共享网关 IP → 10 次失败锁死全员(原 P0-1 症状复现) | 与 S1 同批修复;默认全局节流非阻塞化 |
+| R6-S3 | 中 | Dockerfile:15-18 + uvicorn 0.53 默认 | uvicorn 默认 proxy_headers=True 信任 127.0.0.1 → 回环反代场景先解析可伪造 XFF,与「无信任即忽略」矛盾 | 显式 --no-proxy-headers --forwarded-allow-ips= |
+| R6-S4 | 低 | .env.example | 无 LEXCITE_TRUST_PROXY 条目,必需 opt-in 不可发现 | 补条目与注释 |
+| R6-S5 | 中 | llm.py:163-172 | 环境密钥未绑端点:改端点清空密文后仍发往新端点 | env 密钥按端点绑定或废弃回退 |
+| R6-S6 | 高·发布阻断 | retrieval_services.py:59-76 + .env.example:33 + start.sh:9 + compose.yaml:37-38 | 出厂 RERANKER_BASE_URL=http://reranker:8081/v1 + PROVIDER=none 仍无条件校验;组合部署(reranker 解析内网 IP)→ lifespan 抛 ValidationError → 容器启动失败/重启循环;单机也致 /api/status 等 400(已实测复现校验抛错与调用链) | provider=none 免校验;服务名白名单;启动失败降级告警而非中断 |
+| R6-S7 | 高 | retrieval.py:165-171,182 | P0-4 标点分隔绕过:「刑法:第264条」仍走精确通道 | 并入 P0-4 返工 |
+| R6-S8 | 中 | main.py:62,70-79 | login/setup 免鉴权仍缓冲 8MB 且 422 回显全部输入(实测 7MB 响应) | 独立 16KB 上限;错误处理器不回显 |
+| R6-S9 | 低 | auth.py:66-69 | 全局节流 time.sleep(2) 占线程池,60 次失败后可拖垮服务 | 429 + Retry-After 非阻塞 |
+| R6-S10 | 低 | auth.py:12,55 | ATTEMPTS 无淘汰,可伪造地址无界增长 | 上限 + 定期清理 |
+| R6-S11 | 中 | models.py:122-126 | 100.64.0.0/10 六谓词全过,SSRF 洞 | 拒绝 not ip.is_global |
+| R6-S12 | 中 | llm.py:96-113、retrieval_services.py:59-76、websearch.py:14-25 | 存量/DB 篡改的私有端点加载时不重校验,调用期照用 | 合并后统一重校验 |
+| R6-S13 | 低 | static/app.js:59,86,117,235 | 服务端值内插未转义(当前不可利用) | 统一 esc() 防御纵深 |
+| R6-S14 | 高·发布阻断 | models.py:12 + README.md:40、DEPLOYMENT.md:78-96、RETRIEVAL.md:36,54、AGENT_AND_SEARCH.md:26、app.js:204,208-209 | 白名单只含 localhost/host.docker.internal/ollama,而文档/UI 预设大量使用 reranker、searxng 服务名与 127.0.0.1:11434 宿主 Ollama → 按文档配置无法保存(400),v0.5 称「冲突已解决」不成立 | 白名单补文档化服务名;文档与 UI 预设对齐 |
+
+### 14.2 导入解析(R6-P)
+
+| 编号 | 严重度 | 位置 | 问题 | 修复方向 |
+|---|---|---|---|---|
+| R6-P1 | 高 | ingest.py:13,17,20-21;indexing.py:63-67 | BOM/零宽字符(﻿、​、‍)在行首不匹配、normalize 不清除 → 条文静默合并或丢失(实测) | 解析副本剥离(快照/哈希用原文) |
+| R6-P2 | 高 | ingest.py:83-88 | 连续条号拯救不看当前行标题形态 → 折行引用幻化假条文(实测「第二条之规定,处理。」成条),零警告静默污染 | 并入 P1-9 返工 |
+| R6-P3 | 中高 | ingest.py:17,103 | STRUCTURAL_HEADING 误删折行引用「第二章 规定的程序适用」 | 标题形态黑名单(的/之/规定/所…开头拒) |
+| R6-P4 | 中 | ingest.py:17 | 「第一章 总则。」等带句读标题不剥离、残留上一条文;「第 一 章」不识别 | 允许结尾句读 + 数字间空格 |
+| R6-P5 | 中 | ingest.py:11-13 | 全角数字「第２条」、数字内空格「第十 二条」不识别 → 静默合并 | NUM 补全角、允许 HSPACE |
+| R6-P6 | 中 | indexing.py:66-72 | mark_headings 与 analyze_articles 不同步:正文行被记 heading_path、拯救标题丢 heading_path | 单一检测器 + 传偏移 |
+| R6-P7 | 中 | ingest.py:120-121,129 | import_law 丢弃分析警告,API 导入歧义文本零提示 | 用 analyze_articles 并返回警告 |
+| R6-P8 | 中 | ingest.py:65 | U+2028/U+2029/U+0085/VT/FF 行分隔符不归一 → 条文静默合并(实测) | 解析副本统一转 \n |
+| R6-P9 | 中 | ingest.py:194-217 | DOCX 嵌套表格/内容控件/文本框/页眉表格静默丢失;合并单元格重复输出 | 递归遍历 + tc 去重 |
+| R6-P10 | 中低 | ingest.py:175 | 多字符 Markdown 标记(**)仍破坏拆条、静默丢条文 | 迭代剥离标记族 |
+| R6-P11 | 低 | ingest.py:129,138-145 | 重复导入先解析后查重;SELECT→INSERT 非原子 | 查重前移 + ON CONFLICT |
+| R6-P12 | 低 | ingest.py:24-43 | article_key 混合数字误析(第1百23条→100)、之零坍缩 | 位置式解析或拒非法形态 |
+| R6-P13 | 低中 | ingest.py:177-193 | PDF 无解压体积上限(压缩炸弹) | 输出字符总量上限或子进程隔离 |
+
+### 14.3 研究引擎与前端(R6-E)
+
+| 编号 | 严重度 | 位置 | 问题 | 修复方向 |
+|---|---|---|---|---|
+| R6-E1 | 中 | context.py:33-53 | 用户问句以「?」结尾时,下一片段被当作自报答案:「合同是否有效?请分析。」→ 事实「答:请分析」;焦点回退取第一条历史消息而非当前问题 → 研究跑偏 | 仅接受带 答:/答复: 标记或跟随助手追问的短答;焦点回退当前消息 |
+| R6-E2 | 中 | sources.py:139-168 + 各 lead 边界 | 损坏官方 PDF/DOCX 的解析异常(pypdf/zipfile/python-docx)不在任何窄捕获内 → 整个研究任务失败、已完成轮次作废 | extract_file 包一层转 ValueError 或按 lead 捕获 Exception 标 read_failed |
+| R6-E3 | 中 | retrieval.py:160-184 | 多法查询「《民法典》577条与《刑法》264条」:条号全局共享,民法典第 264 条获 +100 精确加分(错法绑定) | 条号就近绑定法规名(并入 P0-4 返工) |
+| R6-E4 | 中 | main.py:186-259、jobs.py:58-87 | 同步 /ask 不注册活动任务:删除/修改案件时 FK 级联删消息,最终 INSERT 撞 IntegrityError → 全局 409 文案误导;回答基于过期事实;check+insert 非原子 | /ask 走任务状态机或锁定变更;错误文案区分 |
+| R6-E5 | 中低 | runner.py:146-151 | 证据预算 18000 字:超过预算的**用户点名的精确条文被静默跳过**,即使唯一命中(ingest 允许 24000 字条文) | 点名/精确行必纳入(截断+告警)或显示超预算告警 |
+| R6-E6 | 中低 | static/app.js:55,242 | 启动失败时错误写入已隐藏的 #login-screen:工作区空白无任何提示,刷新循环 | 数据加载成功后再隐藏登录屏,或工作区内 toast |
+| R6-E7 | 低中 | static/app.js:120-136 | 研究轮询错误无限重试(2.5s),state.busy 不释放 → 404/持久 500 时界面永久禁用 | 指数退避 + 重试上限 + 终态/404 即恢复 UI |
+| R6-E8 | 低 | main.py:288-292,487-493 | 搜索/模型设置保存 check-then-act 不加 MODEL_LOCK(检索设置已加):任务运行中可切换模型/端点/密钥,绕过密钥绑定 | 锁内检查+保存,冲突 409 |
+| R6-E9 | 低 | static/app.js:58 | openCase 无请求序号:快速切换案件时旧响应覆盖新案件,后续操作作用到错误案件 | AbortController 或单调请求 id |
+| R6-E10 | 低 | app.js 路由加载 | 见 R6-E7 同段代码:GET 轮询与恢复逻辑需一并处理 | 并入 R6-E7 |
+| R6-E11 | 低 | ingest.py:246-249 | fetch_civil 未 trust_env=False、未用 sources.py 的 IP 校验(URL 固定、重定向禁,影响有限) | 与 sources.py 对齐 |
+| R6-E12 | 低 | llm.py:269-271 | 非流式响应无体积上限(流式有 4MB) | 有界流式读取 |
+| R6-E13 | 低 | main.py:50-86 | 早期错误响应跳过安全头/Cache-Control | 统一响应助手 |
+| R6-E14 | 低·体验阻断 | README.md:30、DEPLOYMENT.md:25、start.sh:14、start.bat:17、HTML 教程 | 初始化码指引仍指向日志(P1-5 已改文件) → 新用户无法完成首次初始化 | 统一改为读取 data/setup-code.txt(含 docker compose exec 命令) |
+
+> 注:R6-E10 与原报告 R6-E7 同源,编号保留仅为对应审计报告;实现时合并处理。
+
+---
+
+## 15. 1.4.0整改实施记录(2026-10-19)
+
+### 15.1 范围与确认的策略
+
+本轮实现P0/P1返工项、R6-S1–S14/P1–P13/E1–E14及N1–N5遗留修复，不扩展P2/P3产品能力。原已合格的行为继续保留并回归，详细实测与复现命令见[1.4.0验证记录](VERIFICATION_1.4.0.md)，数据兼容、旧法库复核及回退见[升级手册](UPGRADE_1.4.0.md)。
+
+**共享密码认证决策已经用户确认：正确密码不因匿名失败次数而被硬锁。** 当前没有个人账号，故§3 P0-1“单账号10次失败仍锁该账号”不作为本版实现目标；失败来源仍限流、全局非阻塞节流，验证工作受并发槽限制。已验证密码的快速标签只存在进程内，不持久化较弱校验值；冷缓存校验资源饱和可短暂429，不是匿名触发的全员10分钟账号锁定。本地恢复默认关闭，只接受无XFF、非可信代理模式下的直接loopback连接，且仍须正确密码。
+
+**可信反代必须覆盖XFF为`$remote_addr`，不是追加客户端提供的链。** 这替代§3原返工文字中与“覆盖”矛盾的`$proxy_add_x_forwarded_for`示例。配合后端隔离、显式TRUST_PROXY、Secure cookie、HSTS及所有入口禁用Uvicorn默认代理头解析；完整配置以[部署手册](DEPLOYMENT.md)为准。
+
+密钥语义也明确为：API省略或`null`仅在同端点保留，显式`""`清除并禁用环境回退；网页留空提交`null`。环境密钥同样绑定服务商与端点，分析另绑定配置档。
+
+### 15.2 实现与回归对应
+
+| 需求组 | 当前实现 | 主要位置与回归 |
+|---|---|---|
+| P0-1，P1-1/3/4/5/6，R6-S1/2/3/4/8/9/10，E13/14 | 正确密码优先、受限校验、显式恢复、有界失败记录；小请求与不回显输入；统一安全头；权限、私有码文件及部署/初始化文档对齐 | `auth.py`、`main.py`、Docker/Compose、启动脚本及两份HTML教程；`test_auth.py`、`test_security.py`、`scripts/test_deployment.py` |
+| P0-2，P1-2，R6-S5/6/11/12/14 | 存储/环境密钥绑定；合并后重校验；无效配置可见可修；停用服务免闲置地址校验；补齐受控本地服务名/指定回环端口并拒绝CGNAT等地址 | `models.py`、`llm.py`、`retrieval_services.py`、`websearch.py`；安全、模型协议及PRD回归 |
+| P0-4/5，R6-S7、E3 | 共享就近法规/条号绑定器；多法查询不共享精确条号；未导入与筛选排除分别提示；引用使用相同规范化与绑定规则 | `retrieval.py`、`verification.py`、`ingest.py`；`test_prd_regressions.py`等 |
+| P1-8/9/10/11/13/14，R6-P1–P13，E2/11 | 解析副本归一化但保留原文快照；章节/引用单一检测、带警告拯救；递归DOCX、PDF上限与损坏附件边界；先查重及原子复用；官网读取器复用 | `ingest.py`、`indexing.py`、`main.py`；导入、交叉引用、来源和PRD回归 |
+| P1-15/16，R6-E4/8 | 索引取消强制终态；每任务事件代替逐块SQLite；同步`/ask`共享持久任务；案件/事实/设置原子锁与幂等请求 | `jobs.py`、`indexing.py`、`main.py`；任务竞态、取消及同步接口回归 |
+| P1-17 | 日期/地区/复核下推SQL、批量合格向量ID；修订触发器与有界语料/目录/词频缓存；直接SQL更改失效 | `db.py`、`retrieval.py`、`indexing.py`；5000条冷检索`<2s`及缓存回归 |
+| P1-18，R6-E12 | 有界退避重试、`Retry-After`、JSON/SSE及错误体上限；阻塞响应体取消/超时；重试计入18次实际聊天HTTP请求预算 | `llm.py`、`runner.py`；真实HTTP停滞四项回归及恰好18次请求的边界测试 |
+| P0-3/6，P1-12/19/20，R6-E1/5 | 保留修正查询、部分结论与法源有效性检查；无新增证据提前结束；缺口由服务端确认；当前焦点与事实区分；点名长条文明确遗漏、原文模式不截断 | 研究核心、上下文及引用校验；Agent、核心流程、来源及PRD回归 |
+| R6-S13，E6/7/9/10 | 统一转义；加载成功后显露工作区；切案代次保护；状态码分类、有限退避/超时、恢复只读且串行、保留新编辑内容 | `static/app.js`；15项DOM可靠性及实际浏览器历史回答/链接检查 |
+| N1–N5 | 清理不可达CoverageAudit模型测试/阶段文案，兼容字段本地构造；延续并扩展回归；无新来源计时标skipped；空证据夹具不抛StopIteration；Draft拒绝其他阶段额外字段 | 工作流/来源测试、`browser_fixture_app.py`、`runner.py`、`schemas.py` |
+
+后端、HTML/脚本资源、包元信息及备份版本已统一1.4.0。README、部署、启动指引、两份HTML教程及升级说明已同步；旧版可能污染的法库不会被升级程序静默重解析，须备份后人工对照、重导入复核。
+
+### 15.3 验证状态与未完成门槛
+
+实际通过：416项pytest、15项独立DOM和23项真实HTTP DOM、七组Chromium共82项；发布镜像构建、Compose配置语法及真实隔离Nginx/TLS的11项检查。后者包含100次伪造XFF失败后的正确密码访问、私网DNS下默认停用重排启动、首次初始化/权限、重启持久性及版本资源；不是模拟HTTP替代真实反代。
+
+**§12发布门槛没有全部满足。** 国产聊天/向量/重排API、本地Ollama、重排组合真实权重/GPU或CPU性能、目标单位证书/网络，以及法律人员标注保留集仍待验收；本轮不使用真实密钥或付费模型。服务名可保存、默认镜像可启动和协议夹具通过，不等于对应模型推理成功。Windows启动未实机执行。
+
+DNS校验/建连窗口、响应头前的底层网络超时边界、PDF解码后计数而非内存沙箱、复杂附件人工复核和单进程/共享工作空间边界继续披露，详见本版验证记录。不得据此宣称生产就绪或真实法律准确率达标。
+
+---
+
+## 附录 A:发现清单(三轮审查,R6 已逐项复核)
+
+| # | 严重度 | 位置 | 摘要 | R6 核验 | 对应需求 |
 |---|---|---|---|---|---|
-| 1 | 高 | auth.py:48-54, main.py:122, Dockerfile:15 | 反代下登录限流可匿名锁死全员 | **已修复** | P0-1 ✅ |
-| 2 | 高 | llm.py:134-142 | 改 base_url 后旧密钥发往新端点 | **已修复** | P0-2 ✅ |
-| 3 | 高 | research_agent/runner.py:246 | 修正轮检索词被 [:9] 截断丢弃 | **已修复** | P0-3 ✅ |
-| 4 | 高 | research_agent/retrieval.py:159,172 | 单法库任意「第N条」成为精确命中 | **已修复** | P0-4 ✅ |
-| 5 | 高 | research_agent/retrieval.py:161,236-238; verification.py:20,26-27 | 条号原始字符串比较;「之」后缀仅中文数字 | **已修复** | P0-5 ✅ |
-| 6 | 中 | research_agent/runner.py:216-221,271-274 | 覆盖异常跳过结论清空分支 | **已修复** | P0-6 ✅ |
-| 7 | 中 | main.py:124 | Cookie Secure 默认关 | **已修复** | P1-1 ✅ |
-| 8 | 中 | models.py:96 | 测试连接半盲 SSRF | **已修复** | P1-2 ✅ |
-| 9 | 中 | main.py:53-65 | 鉴权前缓冲 22MB body | **已修复** | P1-3 ✅ |
-| 10 | 中 | db.py:20-28 | SQLite 0644,案卷可直读 | **已修复** | P1-4 ✅ |
-| 11 | 低 | auth.py:34 | 初始化码打印 stdout | **已修复** | P1-5 ✅ |
-| 12 | 低 | main.py:48 | Origin 白名单依赖 Host 头 | **已修复** | P1-6 ✅ |
-| 13 | 低 | static/app.js:108 | 链接渲染未校验 scheme | **已修复**(防御纵深) | P1-7 ✅ |
-| 14 | 中 | ingest.py:90 | 章节行污染条文正文 | **已修复** | P1-8 ✅ |
-| 15 | 中 | ingest.py:42-57,75-80 | 引用启发式吞真实条标题 | **已修复** | P1-9 ✅ |
-| 16 | 中 | ingest.py:118-127 | SHA256 不可审计 | **已修复** | P1-10 ✅ |
-| 17 | 中 | ingest.py:149-160, main.py:340-347 | PDF/DOCX 静默丢失+阻塞事件循环 | **已修复** | P1-11 ✅ |
-| 18 | 低 | research_agent/authorities.py:223-225 | 联网阻断未套复核周期/辖区 | **已修复** | P1-12 ✅ |
-| 19 | 低 | ingest.py:117-127, db.py:61 | 重复导入无查重 | **已修复** | P1-13 ✅ |
-| 20 | 低 | ingest.py:135-141 | Markdown 标记破坏拆条 | **已修复** | P1-14 ✅ |
-| 21 | 中 | indexing.py:198-215 | 取消竞态任务永久 queued | 未修复 | P1-15 |
-| 22 | 中 | jobs.py:100-103, llm.py:238-239 | cancelled() 每行新建 SQLite 连接 | 未修复 | P1-16 |
-| 23 | 中 | research_agent/retrieval.py:50-55,87-107 | 每轮多次全表扫描 | 未修复 | P1-17 |
-| 24 | 低 | llm.py:216-289 | 无退避重试,SSE 可拖到总时限 | 未修复 | P1-18 |
-| 25 | 低 | research_agent/runner.py:275 | 无新证据仍跑满 3 轮 | 部分修复 | P1-19 |
-| 26 | 中 | research_agent/runner.py:133-137,289 | 模型误报产生假缺口 | 未修复 | P1-20 |
-| 27 | 中 | research_agent/retrieval.py:161 | 「之」后缀仅中文数字 | **已修复**(并入 P0-5) | P0-5 ✅ |
-| N1 | 中 | tests/* 多处 | CoverageAudit 测试死分支 | 新增 | §10 N1 |
-| N2 | 中 | 全库 | P0 缺陷无回归测试 | 新增 | §10 N2 |
-| N3 | 低 | research_agent/runner.py:221 | finally 伪警告 | 新增 | §10 N3 |
-| N4 | 低 | tests/browser_fixture_app.py:69 | next() 空 evidence 抛异常 → 500 | 新增 | §10 N4 |
-| N5 | 低 | research_agent/schemas.py | 阶段不匹配静默变空 Draft | 新增 | §10 N5 |
+| 1 | 高 | auth.py:51-83, main.py:140-150, Dockerfile:15-18 | 反代下登录限流可匿名锁死全员 | **需返工**(S1/S2/S3) | P0-1 ⚠️ |
+| 2 | 高 | llm.py:134-147 | 改 base_url 后旧密钥发往新端点 | 合格(残留 S5/S6) | P0-2 ✅ |
+| 3 | 高 | research_agent/runner.py:271 | 修正轮检索词被 [:9] 截断丢弃 | 合格 | P0-3 ✅ |
+| 4 | 高 | research_agent/retrieval.py:165-182 | 单法库任意「第N条」成为精确命中 | **需返工**(S7/S8/E3) | P0-4 ⚠️ |
+| 5 | 高 | retrieval.py/verification.py | 条号原始字符串比较;「之」后缀仅中文数字 | 合格(边角 P12) | P0-5 ✅ |
+| 6 | 中 | research_agent/runner.py:223-313 | 覆盖异常跳过结论清空分支 | 合格 | P0-6 ✅ |
+| 7 | 中 | main.py:36 | Cookie Secure 告警被默认值吞 | **需返工** | P1-1 ⚠️ |
+| 8 | 中 | models.py:112-127 | 测试连接半盲 SSRF | **需返工**(S11/S12/S6) | P1-2 ⚠️ |
+| 9 | 中 | main.py:49-79 | 鉴权前缓冲 22MB body | 合格(残留 S8、22/20MB) | P1-3 ✅ |
+| 10 | 中 | db.py:20-61 | SQLite 0644,案卷可直读 | 合格 | P1-4 ✅ |
+| 11 | 低 | auth.py:23-48 | 初始化码打印 stdout | 合格(文档欠账 E14) | P1-5 ✅ |
+| 12 | 低 | main.py:52-59 | Origin 白名单依赖 Host 头 | 合格 | P1-6 ✅ |
+| 13 | 低 | static/app.js:17 | 链接渲染未校验 scheme | 合格 | P1-7 ✅ |
+| 14 | 中 | ingest.py:17,103 | 章节行污染条文正文 | **需返工**(P3/P4/P6) | P1-8 ⚠️ |
+| 15 | 中 | ingest.py:79-91 | 引用启发式吞真实条标题 | **需返工**(P2 幻化条文) | P1-9 ⚠️ |
+| 16 | 中 | ingest.py/indexing.py/main.py | SHA256 不可审计 | 合格 | P1-10 ✅ |
+| 17 | 中 | ingest.py:177-217, main.py:407-427 | PDF/DOCX 静默丢失+阻塞事件循环 | **需返工**(P9/P13) | P1-11 ⚠️ |
+| 18 | 低 | research_agent/authorities.py:228-236 | 联网阻断未套复核周期/辖区 | 合格 | P1-12 ✅ |
+| 19 | 低 | ingest.py:138-145, db.py:74-79 | 重复导入无查重 | 合格(残留 P11) | P1-13 ✅ |
+| 20 | 低 | ingest.py:163-176 | Markdown 标记破坏拆条 | **需返工**(P10) | P1-14 ⚠️ |
+| 21 | 中 | indexing.py:199-235 | 取消竞态任务永久 queued | 未修复 | P1-15 |
+| 22 | 中 | jobs.py:100-103, llm.py:230-244 | cancelled() 每行新建 SQLite 连接 | 未修复 | P1-16 |
+| 23 | 中 | research_agent/retrieval.py:51-106 | 每轮多次全表扫描 | 未修复 | P1-17 |
+| 24 | 低 | llm.py:217-330 | 无退避重试,SSE 可拖到总时限 | 部分(预算已做/重试未做) | P1-18 |
+| 25 | 低 | research_agent/runner.py:302-310 | 无新证据仍跑满 3 轮 | **已修复** | P1-19 ✅ |
+| 26 | 中 | research_agent/runner.py:139-144 | 模型误报产生假缺口 | 未修复 | P1-20 |
+| 27 | 中 | research_agent/retrieval.py:161 | 「之」后缀仅中文数字 | 合格(并入 P0-5) | P0-5 ✅ |
+| N1 | 中 | tests/* 多处(范围扩大) | CoverageAudit 测试死分支 | 未修复 | §10 N1 |
+| N2 | 中 | 全库 | P0 缺陷无回归测试 | 已解决 | §10 N2 ✅ |
+| N3 | 低 | research_agent/runner.py:222-227 | finally 伪警告 | 未修复 | §10 N3 |
+| N4 | 低 | tests/browser_fixture_app.py:69 | next() 空 evidence 抛异常 → 500 | 未修复 | §10 N4 |
+| N5 | 低 | research_agent/schemas.py:60-66 | 阶段不匹配静默变空 Draft | 未修复 | §10 N5 |
+| — | — | 见 §14.1~14.3 | 三审新增 41 项 | 新增 | R6-S1~S14 / R6-P1~P13 / R6-E1~E14 |
 
-**两轮基线**:R1(重构前)209 项通过;R2(重构后 acb2c23)218 项通过。重构为结构迁移,除 P0-6 外未修复已知缺陷;P1-19 部分修复。
+**基线**:R1(重构前)209 项;R2(重构后 acb2c23)218 项;R3~R5 后 286 项全通过(HEAD f2f002c)。R6 为纯审计轮,未改代码。

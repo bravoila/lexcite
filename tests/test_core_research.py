@@ -4,7 +4,7 @@ import time
 import pytest
 from app import db, ingest, llm, sources, websearch
 from app.research_agent import authorities, context as case_state, runner as engine, retrieval
-from app.research_agent.schemas import CoverageAudit, Draft, Plan, Verdict, FactExtraction, SourceMetadata, ClarificationAudit
+from app.research_agent.schemas import Draft, Plan, Verdict, FactExtraction, SourceMetadata, ClarificationAudit
 
 QUESTION='离婚后，彩礼可以要求对方返还吗'
 SUPPLEMENT='双方是否办理了结婚登记？办了。 离婚前是否共同生活？若共同生活，持续时间大约多久？共同生活一年。 是否存在因给付彩礼导致给付方生活困难的情形？没有 彩礼是否已用于共同生活或生育抚养子女？没有。'
@@ -190,7 +190,6 @@ def test_empty_draft_does_not_report_successful_citation_validation(client,corpu
     cid=create(client)
     def model(system,payload,schema,verify=False):
         if schema is Plan:return Plan(queries=['未支付价款'])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence']],coverage='partial',reason='只供管线验证')
         if schema is Draft:return Draft(insufficient=True,missing_facts=['彩礼返还的法律依据未在evidence中提供'])
         raise AssertionError(schema)
     monkeypatch.setattr(llm,'request_json',model)
@@ -210,7 +209,6 @@ def test_online_acquires_official_text_and_persists_followup(client,monkeypatch)
     def model(system,payload,schema,verify=False):
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=['彩礼纠纷'],authorities=[{'name':NAME,'articles':['第五条']}])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if r['number']=='第五条'],coverage='sufficient',reason='Synthetic fixture only')
         if schema is Draft:
             draft_context.append(payload);row=payload['evidence'][0]
             return Draft(insufficient=False,claims=[{'text':'这是用于验证引用流程的测试结论。','kind':'rule','section':'answer','evidence':[{'article_id':row['id'],'quote':row['body']}]}])
@@ -234,7 +232,7 @@ def test_online_acquires_official_text_and_persists_followup(client,monkeypatch)
 def test_online_failure_preserves_gap_and_does_not_loop_identically(client,monkeypatch):
     cid=create(client);attempts=[]
     monkeypatch.setattr(authorities,'directory_for',lambda _: [{'name':NAME,'articles':[]}])
-    monkeypatch.setattr(llm,'request_json',lambda *a,**kw:Plan())
+    monkeypatch.setattr(llm,'request_json',lambda system,payload,schema,verify=False:schema())
     def fail(url):attempts.append(url);raise ValueError('官网拒绝访问')
     monkeypatch.setattr(sources,'read_official',fail)
     r=engine.answer(cid,QUESTION,online_research=True)
@@ -312,7 +310,6 @@ def test_auto_search_failure_keeps_supported_local_part(client,corpus,monkeypatc
     monkeypatch.setattr(websearch,'search',fail)
     def model(system,payload,schema,verify=False):
         if schema is Plan:return Plan(queries=['未支付价款'],authorities=[missing])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence']],coverage='partial',missing_authorities=[missing],reason='可回答通则')
         if schema is Draft:
             row=payload['evidence'][0]
             return Draft(insufficient=True,claims=[{'text':'部分测试规则保留。','kind':'rule','evidence':[{'article_id':row['id'],'quote':row['body']}]}],missing_authorities=[missing])

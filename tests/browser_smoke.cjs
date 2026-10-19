@@ -28,7 +28,7 @@ async function metadata(page,name){await page.locator('#law-name').fill(name);aw
  const page=await context.newPage();const errors=[],requests=[];
  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>requests.push(r.url()));
  await page.goto(base);await page.locator('#password').fill(password);await page.locator('#login-button').click();await page.locator('#workspace').waitFor({state:'visible'});
- assert(requests.some(u=>u.endsWith('/assets/1.3.2/app.js')));assert(!requests.some(u=>u.endsWith('/static/app.js')));checks.push('versioned-assets-loaded');
+ assert(requests.some(u=>u.endsWith('/assets/1.4.0/app.js')));assert(!requests.some(u=>u.endsWith('/static/app.js')));checks.push('versioned-assets-loaded');
  await openImport(page);await metadata(page,'浏览器解析测试');
  const invalid='这里没有正式法条标题，应当在弹窗内清楚显示读取错误。';
  await page.locator('#law-text').fill(invalid);await page.locator('#preview-law').click();
@@ -69,7 +69,7 @@ async function metadata(page,name){await page.locator('#law-name').fill(name);aw
  await page.route('**/api/session',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({initialized:true,authenticated:false,version:'1.0.1'})}));
  await page.reload();await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('版本不一致'));assert(await page.locator('#login-button').isDisabled());checks.push('mixed-version-error-visible');
  await page.unroute('**/api/session');
- await page.route(base+'/',async route=>{const response=await route.fetch();let html=await response.text();html=html.replace(' data-app-version="1.3.2"','').replace(/<p id="client-load-status"[\s\S]*?<\/p>/,'');await route.fulfill({response,body:html});});
+ await page.route(base+'/',async route=>{const response=await route.fetch();let html=await response.text();html=html.replace(' data-app-version="1.4.0"','').replace(/<p id="client-load-status"[\s\S]*?<\/p>/,'');await route.fulfill({response,body:html});});
  await page.reload();await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('页面与脚本版本不一致'));assert(await page.locator('#login-button').isDisabled());checks.push('old-html-new-script-fails-clearly');
  assert.deepEqual(errors,[]);
  const result={passed:true,browser:browser.version(),checks,external_download:'fixture',actual_chromium_layout:true};

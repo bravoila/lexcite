@@ -11,11 +11,11 @@ services:
       # LEXCITE_SECURE_COOKIE=1 forces Secure even without PUBLIC_URL.
       LEXCITE_SECURE_COOKIE: ${LEXCITE_SECURE_COOKIE:-0}
       LEXCITE_PUBLIC_URL: ${LEXCITE_PUBLIC_URL:-}
-      # Set to 1 only when a reverse proxy sits in front and it appends/overwrites
-      # X-Forwarded-For with the real client IP (nginx: proxy_set_header
-      # X-Forwarded-For $proxy_add_x_forwarded_for). Otherwise leave empty so
+      # Set to 1 only behind a trusted reverse proxy that overwrites
+      # X-Forwarded-For with $remote_addr. Otherwise leave disabled so
       # spoofed XFF headers cannot bypass the login rate limit.
-      LEXCITE_TRUST_PROXY: ${LEXCITE_TRUST_PROXY:-}
+      LEXCITE_TRUST_PROXY: ${LEXCITE_TRUST_PROXY:-0}
+      LEXCITE_LOCAL_RECOVERY: ${LEXCITE_LOCAL_RECOVERY:-0}
       MODEL_PROFILE: ${MODEL_PROFILE:-local}
       MODEL_LOCAL_PROVIDER: ${MODEL_LOCAL_PROVIDER:-}
       MODEL_LOCAL_BASE_URL: ${MODEL_LOCAL_BASE_URL:-}

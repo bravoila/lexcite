@@ -1,8 +1,12 @@
 {
   "name": "lexcite-ui-tests",
   "private": true,
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Optional DOM integration tests; Node is not required to run LexCite",
-  "scripts": {"test:ui": "python scripts/test_ui.py"},
-  "devDependencies": {"jsdom": "26.1.0"}
+  "scripts": {
+    "test:ui": "node tests/ui_reliability.cjs && python scripts/test_ui.py"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
 }

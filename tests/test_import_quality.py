@@ -194,3 +194,194 @@ def test_markdown_extraction_roundtrip_matches_plaintext_split():
     plain = "第一条 正文一。\n第二条 正文二。"
     md = "## 第一条 正文一。\n- 第二条 正文二。"
     assert parse_articles(extract_file("法规.md", md.encode())) == parse_articles(plain)
+
+
+@pytest.mark.parametrize("marker", ["\ufeff", "\u200b", "\u200d", "\u200c", "\u2060"])
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85", "\v", "\f", "\r\n"])
+def test_invisible_markers_and_unicode_line_breaks_never_merge_articles(marker, separator):
+    source = marker + "第一条 正文一。" + separator + marker + "第２条 正文二。" + separator + "第十 二条 正文十二。"
+    result = analyze_articles(source)
+    assert [ingest.article_key(row["number"]) for row in result["articles"]] == [(1, 0), (2, 0), (12, 0)]
+    assert result["warnings"]
+
+
+def test_normalized_parsing_keeps_exact_original_snapshot(client):
+    source = "\ufeff第一条 原文一。\u2028\u200b第二条 原文二。"
+    response = client.post("/api/laws", json={"name": "原文保真测试", "version": "v1", "valid_from": "2021-01-01", "text": source})
+    assert response.status_code == 200 and response.json()["count"] == 2
+    lid = response.json()["id"]
+    with db.connect() as c:
+        snapshot = c.execute("SELECT content FROM law_snapshots WHERE law_id=?", (lid,)).fetchone()[0]
+    assert zlib.decompress(snapshot).decode() == source
+    assert client.get(f"/api/laws/{lid}/hash-check").json()["sha256"] == hashlib.sha256(source.encode()).hexdigest()
+
+
+def test_consecutive_number_does_not_turn_reference_into_fake_article():
+    result = analyze_articles("第一条 依照《中华人民共和国合同法》\n第二条之规定，处理。\n第三条 正文三。")
+    assert [row["number"] for row in result["articles"]] == ["第一条", "第三条"]
+    assert "第二条之规定" in result["articles"][0]["body"]
+    assert result["cross_reference_count"] == 1 and result["warnings"]
+
+
+@pytest.mark.parametrize("heading", ["第一章 总则。", "第 一 章 总则;", "第一章 总则;附则", "第一章总则"])
+def test_structural_heading_variants_share_parser_and_index_metadata(client, heading):
+    text = "第一条 正文一。\n" + heading + "\n第二条 正文二。"
+    result = analyze_articles(text)
+    assert result["articles"][0]["body"] == "正文一。"
+    assert result["heading_paths"]["第二条"] == heading
+    lid = client.post("/api/laws", json={"name": "章节格式测试", "version": "v1", "valid_from": "2021-01-01", "text": text}).json()["id"]
+    from app import indexing
+    rows = [row for row in indexing.articles() if row["law_id"] == lid]
+    assert rows[1]["heading_path"] == heading
+
+
+def test_wrapped_chapter_reference_is_not_removed_or_indexed_as_heading():
+    result = analyze_articles("第一章 总则\n第一条 应当依照\n第二章 规定的程序适用，依照前条规定。\n第二条 正文二。")
+    assert "第二章 规定的程序适用" in result["articles"][0]["body"]
+    assert result["heading_paths"]["第二条"] == "第一章 总则"
+
+
+def test_rescued_heading_keeps_chapter_path_and_surfaces_import_warning(client):
+    text = "第一章 总则\n第一条 依照《测试法规》\n第二条 正文二。\n第三条 正文三。"
+    response = client.post("/api/laws", json={"name": "歧义提示测试", "version": "v1", "valid_from": "2021-01-01", "text": text})
+    assert response.status_code == 200 and response.json()["warnings"]
+    lid = response.json()["id"]
+    from app import indexing
+    assert all(row["heading_path"] == "第一章 总则" for row in indexing.articles() if row["law_id"] == lid)
+    with db.connect() as c:
+        audit = json.loads(c.execute("SELECT details FROM audit WHERE action='law_import'").fetchone()[0])
+    assert audit["warnings"] == response.json()["warnings"]
+
+
+def test_import_returns_reference_warnings_without_preview(client):
+    text = "第一条 依据本法\n第九条的规定，处理相关事项。\n第二条 正文二。"
+    response = client.post("/api/laws", json={"name": "引用提示测试", "version": "v1", "valid_from": "2021-01-01", "text": text})
+    assert response.status_code == 200
+    assert response.json()["cross_reference_count"] == 1 and response.json()["warnings"]
+
+
+def test_duplicate_identity_is_checked_before_parsing(client, corpus):
+    law = json.loads((db.ROOT / "examples/civil_excerpt.json").read_text())
+    law["text"] = "这份文本没有任何合法条号，重复身份不应该重新解析。"
+    response = client.post("/api/laws", json=law)
+    assert response.status_code == 200 and response.json()["duplicate"]
+    assert response.json()["id"] == corpus["law"]["id"]
+
+
+def test_concurrent_duplicate_imports_return_same_record(client, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.models import LawInput
+    from app import indexing
+    indexing.ensure_schema()
+    barrier = threading.Barrier(2)
+    original = ingest.analyze_articles
+    def analyze(text):
+        result = original(text)
+        barrier.wait(timeout=3)
+        return result
+    monkeypatch.setattr(ingest, "analyze_articles", analyze)
+    law = LawInput(name="并发重复测试", version="v1", valid_from="2021-01-01", text="第一条 并发导入测试正文。")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(ingest.import_law, [law, law]))
+    assert responses[0]["id"] == responses[1]["id"]
+    assert sum(bool(response.get("duplicate")) for response in responses) == 1
+
+
+def test_docx_recursive_structures_headers_and_merged_cells_are_not_lost_or_duplicated():
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.shared import Inches
+    doc = Document()
+    doc.add_paragraph("正文段落。")
+    table = doc.add_table(rows=1, cols=2)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    merged.text = "合并单元格正文。"
+    merged.add_table(rows=1, cols=1).cell(0, 0).text = "嵌套表格正文。"
+    control = OxmlElement("w:sdt")
+    content = OxmlElement("w:sdtContent")
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    text = OxmlElement("w:t")
+    text.text = "内容控件正文。"
+    run.append(text); paragraph.append(run); content.append(paragraph); control.append(content)
+    doc.element.body.append(control)
+    box = OxmlElement("w:txbxContent")
+    paragraph = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    text = OxmlElement("w:t")
+    text.text = "文本框正文。"
+    run.append(text); paragraph.append(run); box.append(paragraph)
+    doc.element.body.append(box)
+    section = doc.sections[0]
+    for index, container in enumerate((section.header, section.footer, section.first_page_header,
+                                       section.first_page_footer, section.even_page_header, section.even_page_footer)):
+        container.add_table(rows=1, cols=1, width=Inches(1)).cell(0, 0).text = f"页眉页脚表格{index}。"
+    stream = io.BytesIO()
+    doc.save(stream)
+    result = extract_file("正文.docx", stream.getvalue())
+    for expected in ("正文段落。", "合并单元格正文。", "嵌套表格正文。", "内容控件正文。", "文本框正文。",
+                     *(f"页眉页脚表格{i}。" for i in range(6))):
+        assert result.count(expected) == 1
+
+
+def test_file_extraction_does_not_block_other_requests(client, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    entered, release = threading.Event(), threading.Event()
+    def slow_extract(*args):
+        entered.set()
+        assert release.wait(3)
+        return "第一条 测试正文。"
+    monkeypatch.setattr(ingest, "extract_file", slow_extract)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        extraction = pool.submit(client.post, "/api/extract", files={"file": ("正文.docx", b"test")})
+        try:
+            assert entered.wait(1)
+            assert pool.submit(client.get, "/healthz").result(timeout=1).status_code == 200
+        finally:
+            release.set()
+        assert extraction.result(timeout=2).status_code == 200
+
+
+@pytest.mark.parametrize("name,content", [("broken.pdf", b"%PDF-broken"), ("broken.docx", b"not-a-zip")])
+def test_corrupt_documents_have_explicit_parse_errors(name, content):
+    with pytest.raises(ValueError, match="文件损坏"):
+        extract_file(name, content)
+
+
+def test_pdf_has_aggregate_extracted_text_limit(monkeypatch):
+    monkeypatch.setattr(ingest, "MAX_EXTRACTED_CHARS", 35)
+    with pytest.raises(ValueError, match="超过200万字符"):
+        extract_file("正文.pdf", _minimal_pdf(["long legal provision text", "another long legal provision text"]))
+
+
+@pytest.mark.parametrize("markdown", [
+    "**第一条** 正文一。\n> 1. **第二条** 正文二。",
+    "####### 第一条 正文一。\n> > - **第二条** 正文二。",
+    "__第一条__ 正文一。\n1) 第二条 正文二。",
+])
+def test_nested_markdown_does_not_silently_drop_articles(markdown):
+    assert parse_articles(extract_file("正文.md", markdown.encode())) == parse_articles("第一条 正文一。\n第二条 正文二。")
+
+
+def test_txt_keeps_bom_while_markdown_removes_it():
+    source = "\ufeff第一条 原文内容。"
+    assert extract_file("正文.txt", source.encode()) == source
+    assert extract_file("正文.md", source.encode()) == source.lstrip("\ufeff")
+
+
+def test_mixed_and_fullwidth_article_digits_and_invalid_zero_suffix():
+    assert ingest.article_key("第1百23条") == (123, 0)
+    assert ingest.article_key("第１２３条之２") == (123, 2)
+    for label in ("第1条之零", "第1条之0", "第零条"):
+        with pytest.raises(ValueError, match="大于零"):
+            ingest.article_key(label)
+
+
+def test_corrupt_snapshot_reports_explicit_error(client):
+    lid, _ = _import_civil(client)
+    with db.connect() as c:
+        c.execute("UPDATE law_snapshots SET content=? WHERE law_id=?", (b"corrupt", lid))
+    response = client.get(f"/api/laws/{lid}/hash-check")
+    assert response.status_code == 409 and "原文存档损坏" in response.json()["detail"]

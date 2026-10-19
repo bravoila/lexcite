@@ -1,7 +1,7 @@
 import json
 from app import db, llm
 from app.research_agent import runner as engine
-from app.research_agent.schemas import CoverageAudit, FactExtraction, Draft, Plan, Repair, Verdict
+from app.research_agent.schemas import FactExtraction, Draft, Plan, Repair, Verdict
 
 
 def new_case(c,title="合同纠纷"):
@@ -41,7 +41,6 @@ def test_combined_analysis_review_flow_and_recall(client,corpus,monkeypatch):
     calls=[]
     def fake(system,payload,schema,verify=False):
         calls.append(payload)
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=["未支付价款"])
         if schema is Draft:
@@ -62,7 +61,6 @@ def test_combined_analysis_review_flow_and_recall(client,corpus,monkeypatch):
 def test_unsupported_or_unavailable_verification_blocks(client,corpus,monkeypatch):
     set_model();cid=new_case(client)
     def fake(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=[])
         if schema is Draft:
@@ -82,7 +80,6 @@ def test_unsupported_or_unavailable_verification_blocks(client,corpus,monkeypatc
 def test_fabricated_id_never_rendered(client,corpus,monkeypatch):
     set_model();cid=new_case(client)
     def fake(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=[])
         return Draft(insufficient=False,claims=[{"text":"虚假规则","kind":"rule","evidence":[{"article_id":"does-not-exist","quote":"这个不存在的规则会被阻止"}]}])
@@ -113,14 +110,16 @@ def test_nonofficial_source_rejected(client):
 def test_api_adapter_headers_schema(client,monkeypatch):
     set_model()
     import httpx
+    from contextlib import contextmanager
     captured=[]
     class FakeClient:
         def __init__(self,**kwargs):pass
         def __enter__(self):return self
         def __exit__(self,*args):pass
-        def post(self,url,json,headers):
+        @contextmanager
+        def stream(self,method,url,json,headers,timeout):
             captured.append((url,json,headers))
-            return httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{"content":'{"queries":["测试"]}'}}]})
+            yield httpx.Response(200,json={"choices":[{"finish_reason":"stop","message":{"content":'{"queries":["测试"]}'}}]})
     monkeypatch.setattr(llm.httpx,"Client",FakeClient)
     assert llm.request_json("test",{},Plan).queries==["测试"]
     url,body,headers=captured[0]

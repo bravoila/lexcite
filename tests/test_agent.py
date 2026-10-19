@@ -5,7 +5,7 @@ import httpx
 import pytest
 from app import db, jobs, llm, websearch
 from app.research_agent import runner as engine, retrieval
-from app.research_agent.schemas import CoverageAudit, FactExtraction, Draft, Plan, Repair, Verdict
+from app.research_agent.schemas import FactExtraction, Draft, Plan, Repair, Verdict
 
 
 def setup(client):
@@ -72,7 +72,6 @@ def test_repair_invalid_quote_then_succeed(client,corpus,monkeypatch):
     cid=setup(client); calls=[]; events=[]
     def model(system,payload,schema,verify=False):
         calls.append((schema,payload))
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=['不履行合同义务'])
         if schema is Draft:
@@ -98,7 +97,6 @@ def test_semantic_failure_repairs_without_planning_or_retrieval(client,corpus,mo
     original=retrieval.search
     def search(queries,*args,**kwargs):searches.append(queries);return original(queries,*args,**kwargs)
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:
             plans.append(payload)
@@ -125,7 +123,6 @@ def test_repair_queries_survive_many_authorities(client,corpus,monkeypatch):
     original=retrieval.search
     def search(queries,*args,**kwargs):searches.append(queries);return original(queries,*args,**kwargs)
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:
             plans.append(1)
@@ -143,7 +140,6 @@ def test_repair_queries_survive_many_authorities(client,corpus,monkeypatch):
 def test_exhausted_agent_never_publishes_invalid_claim(client,corpus,monkeypatch):
     cid=setup(client)
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan()
         if schema is Draft:return good(payload)
@@ -393,7 +389,6 @@ def test_web_leads_not_legal_evidence(client,corpus,monkeypatch):
     monkeypatch.setattr(websearch,'search',search)
     monkeypatch.setattr(websearch,'read_lead',lambda row:row|{'state':'read_unreviewed'})
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan()
         assert all('fixture.html' not in e.get('source_url','') for e in payload['evidence'])
@@ -422,7 +417,6 @@ def wait_job(client,jid):
 def test_job_progress_idempotency_and_reload(client,corpus,monkeypatch):
     cid=setup(client); entered=threading.Event(); release=threading.Event()
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan()
         if schema is Draft:
@@ -540,7 +534,6 @@ def test_search_failure_preserves_local_analysis(client,corpus,monkeypatch):
     def fail(*args):raise websearch.SearchError('测试搜索不可用')
     monkeypatch.setattr(websearch,'search',fail)
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan()
         if schema is Draft:return good(payload)
@@ -560,7 +553,6 @@ def test_agent_auth_required(client):
 def test_clarification_stops_unproductive_retries(client,corpus,monkeypatch):
     cid=setup(client); plans=[]
     def model(system,payload,schema,verify=False):
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:
             plans.append(1)

@@ -1,6 +1,7 @@
 """Structured contracts for research and independent evidence review."""
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from ..ingest import article_key
 from ..law_names import clean_title
 
 
@@ -20,6 +21,14 @@ class AuthorityNeed(BaseModel):
     reason: str = Field(default="", max_length=300)
 
     _clean_name = field_validator('name', mode='before')(clean_title)
+
+    @field_validator("articles")
+    @classmethod
+    def valid_articles(cls, values):
+        for value in values:
+            if article_key(value) == (0, 0):
+                raise ValueError("法源条号须使用第X条或第X条之Y的有效编号")
+        return values
 
 class FactItem(BaseModel):
     topic: str = Field(min_length=2, max_length=160)
@@ -58,6 +67,7 @@ class SourceMetadata(BaseModel):
     _clean_name = field_validator('name', mode='before')(clean_title)
 
 class Draft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     coverage: Literal["sufficient", "partial", "missing"] | None = None
     claims: list[Claim] = Field(default_factory=list, max_length=8)
     missing_facts: list[str] = Field(default_factory=list, max_length=6)

@@ -15,4 +15,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD pytho
 # Client addresses for login rate limiting: X-Forwarded-For is parsed by the app
 # only when LEXCITE_TRUST_PROXY=1 (see compose.yaml). Do not use uvicorn's
 # --proxy-headers here; the app resolves the trusted-proxy address itself.
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-proxy-headers", "--forwarded-allow-ips="]

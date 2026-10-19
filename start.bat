@@ -14,7 +14,9 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-echo 打开 http://localhost:8080 ，首次使用请复制下方初始化码。
 docker compose logs --tail=20 lexcite
+echo 打开 http://localhost:8080 。服务就绪后，未初始化的实例请运行：
+echo   docker compose exec lexcite cat data/setup-code.txt
+echo 初始化码不会写入日志。已初始化或已设置初始密码时没有该文件，直接用工作空间密码登录。
 start http://localhost:8080
 pause

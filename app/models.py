@@ -3,13 +3,21 @@ import ipaddress
 import socket
 from typing import Literal
 from urllib.parse import urlsplit
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from .sources import official_url
 
 # Hosts an operator may legitimately point model/embedding/rerank services at
-# on the deployment machine; numeric loopback stays blocked so an untrusted
-# save cannot probe the host or reach metadata endpoints.
-ALLOWED_LOCAL_ENDPOINT_HOSTS = ("localhost", "host.docker.internal", "ollama")
+# Other private endpoints require an explicitly named local service.
+ALLOWED_LOCAL_ENDPOINT_HOSTS = ("localhost", "host.docker.internal", "ollama", "reranker", "searxng")
+LOCAL_SERVICE_PORTS = {11434, 8081}
+
+
+def validate_configuration(schema, value, label):
+    try:
+        return value | schema.model_validate(value).model_dump()
+    except ValidationError as exc:
+        detail = "；".join(error["msg"] for error in exc.errors(include_input=False))
+        raise ValueError(f"{label}配置无效，请在设置中重新保存：{detail}") from exc
 
 
 def _resolved_ips(host, port):
@@ -112,18 +120,26 @@ class SettingsInput(BaseModel):
     @field_validator("base_url")
     @classmethod
     def endpoint(cls, value):
-        u = urlsplit(value)
+        try:
+            u = urlsplit(value)
+            port = u.port
+        except ValueError as exc:
+            raise ValueError("服务地址格式不正确；请核对主机名和端口") from exc
         if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password or u.query or u.fragment:
             raise ValueError("服务地址格式不正确；使用服务的 /v1 或兼容端点")
         host = u.hostname
+        if not host.isascii() or any(c.isspace() for c in value) or "\\" in value:
+            raise ValueError("服务地址格式不正确；请使用 ASCII 主机名")
+        if host in ("127.0.0.1", "::1") and port in LOCAL_SERVICE_PORTS:
+            return value.rstrip("/")
         if host not in ALLOWED_LOCAL_ENDPOINT_HOSTS:
             if host in ("169.254.169.254", "metadata.google.internal"):
                 raise ValueError("不允许云实例元数据地址")
-            for ip in _resolved_ips(host, u.port):
+            for ip in _resolved_ips(host, port):
                 if ip.version == 6 and ip.ipv4_mapped:
                     ip = ip.ipv4_mapped
-                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
-                    raise ValueError("不允许内网、回环或保留地址；本地模型请使用 localhost、host.docker.internal 或 ollama 服务名")
+                if not ip.is_global or ip.is_multicast or ip.is_reserved:
+                    raise ValueError("不允许内网、回环或保留地址；本地服务请使用 localhost、host.docker.internal、ollama、reranker 或 searxng 服务名")
         return value.rstrip("/")
 
 

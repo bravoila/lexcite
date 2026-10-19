@@ -38,7 +38,7 @@ def split_questions(items):
 
 
 def evidence_key(rows):
-    ranking_fields={'retrieval_score','retrieval_channels','rerank_score','expanded'}
+    ranking_fields={'retrieval_score','retrieval_channels','rerank_score','expanded','requested'}
     return json.dumps(sorted(
         ({k:v for k,v in row.items() if k not in ranking_fields} for row in rows),
         key=lambda row:row['id']),ensure_ascii=False,sort_keys=True)
@@ -58,7 +58,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             'generated_at':db.now(),'event_date':case['event_date'],'jurisdiction':case['jurisdiction'],'analysis_scope':'available_sources',
             'model':s['model'] if s['provider']!='none' else None,'thinking_mode':s['thinking_mode'],
             'reasoning':[],'reasoning_enabled':s['show_reasoning'],'case_facts':state['facts'],'research_focus':state['research_focus'],
-            'retrieval_runs':[],'model_runs':[],'model_errors':[],'clarifications_removed':[],'online_research':online,'candidate_sources':[],
+            'retrieval_runs':[],'model_runs':[],'model_errors':[],'clarifications_removed':[],'online_research':online,'candidate_sources':[],'evidence_omissions':[],
             'notice':'已陈述事实不等于客观事实已核实。引用匹配不保证法律适用正确；应另核对过渡规定。联网临时原文未人工复核，不自动纳入正式法库。'}
     context={'question':question,'confirmed_facts':[m['text'] for m in memories],
              'previous_user_messages_unconfirmed':state['history'],'event_date':case['event_date'],'jurisdiction':case['jurisdiction'],
@@ -77,10 +77,10 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         check()
         if result['model_calls']>=18:raise BudgetExceeded('达到18次模型调用上限')
         result['model_calls']+=1
-        item={'call':result['model_calls'],'stage':{Plan:'研究计划',Draft:'法律分析',Repair:'局部修正',Verdict:'证据复核',ClarificationAudit:'追问核对',FactExtraction:'理解案件信息',CoverageAudit:'检查法源覆盖',SourceMetadata:'核对官方文件'}.get(schema,'模型调用'),
+        item={'call':result['model_calls'],'stage':{Plan:'研究计划',Draft:'法律分析',Repair:'局部修正',Verdict:'证据复核',ClarificationAudit:'追问核对',FactExtraction:'理解案件信息',SourceMetadata:'核对官方文件'}.get(schema,'模型调用'),
               'round':result['rounds'],'model':s['verify_model'] if verify and s['verify_model'] else s['model'],'text':'','status':'running','truncated':False}
         run={'call':item['call'],'stage':item['stage'],'round':item['round'],'model':item['model'],'status':'running',
-             'payload_characters':len(json.dumps(payload,ensure_ascii=False)),'elapsed_seconds':0,'usage':None}
+             'payload_characters':len(json.dumps(payload,ensure_ascii=False)),'elapsed_seconds':0,'usage':None,'http_attempts':1}
         result['model_runs'].append(run)
         call_started=time.monotonic()
         auxiliary=schema in (Plan,FactExtraction,ClarificationAudit,SourceMetadata)
@@ -97,9 +97,17 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             if remaining>0:item['text']+=fragment[:remaining]
             if len(fragment)>max(0,remaining):item['truncated']=True
             if time.monotonic()-last[0]>=.25:publish();last[0]=time.monotonic()
+        def http_attempt(attempt):
+            check()
+            if attempt > 1:
+                if result['model_calls'] >= 18:
+                    raise BudgetExceeded('达到18次模型调用上限，未继续重试')
+                result['model_calls'] += 1
+                emit('model_retry','重试临时接口错误',f'{item["stage"]}第 {attempt} 次 HTTP 请求；计入18次总请求预算。')
+            run['http_attempts'] = attempt
         publish()
         try:
-            with llm.capture_reasoning(receive if s['show_reasoning'] else None),llm.capture_usage(lambda usage:run.update(usage=usage)),llm.request_options(**options):
+            with llm.capture_reasoning(receive if s['show_reasoning'] else None),llm.capture_usage(lambda usage:run.update(usage=usage)),llm.capture_attempts(http_attempt),llm.request_options(**options):
                 value=llm.request_json(system,payload,schema,verify=verify)
             if not isinstance(value,schema):
                 try:value=schema.model_validate(value.model_dump() if hasattr(value,'model_dump') else value)
@@ -137,17 +145,20 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         return retrieval.authority_gaps(remaining,case['event_date'],case['jurisdiction'])
 
     def update_gaps(needs, explicit=()):
-        result['source_gaps']=gaps(needs)
-        for raw in explicit:
-            need=raw.model_dump() if hasattr(raw,'model_dump') else raw
-            if not any(retrieval.law_key(x['name'])==retrieval.law_key(need['name']) for x in result['source_gaps']):
-                result['source_gaps'].append(need|{'state':'not_retrieved','detail':need.get('reason') or '本轮尚未取得支持核心争点的条文。'})
+        result['source_gaps']=gaps(unique_needs(list(needs)+list(explicit)))
 
     def bound(rows):
         selected,seen,size=[],set(),0
         for row in rows:
-            if row['id'] not in seen and size+len(row['body'])<=18000:
+            if row['id'] in seen:
+                continue
+            requested = row.get('requested') or 'exact' in row.get('retrieval_channels', [])
+            if size+len(row['body'])<=18000 or (not use_model and requested):
                 selected.append(row);seen.add(row['id']);size+=len(row['body'])
+            elif requested:
+                note = {'id':row['id'],'name':row['name'],'number':row['number'],'characters':len(row['body']),'reason':'超过18000字符完整条文上下文预算'}
+                if note not in result['evidence_omissions']:
+                    result['evidence_omissions'].append(note)
         return selected
 
     def finish(summary=None):
@@ -163,7 +174,10 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
         result['candidate_sources']=[{'name':r['name'],'number':r['number'],'id':r['id']} for r in candidates[:8]]
         if not use_model:
             result['status']='evidence_only' if evidence else 'insufficient'
-            result['citations']=[r|{'label':i+1,'quotes':[]} for i,r in enumerate(evidence[:8])]
+            raw = [r for r in evidence if r.get('requested') or 'exact' in r.get('retrieval_channels', [])]
+            ids = {r['id'] for r in raw}
+            raw += [r for r in evidence[:8] if r['id'] not in ids]
+            result['citations']=[r|{'label':i+1,'quotes':[]} for i,r in enumerate(raw)]
         elif not result['claims']:
             result['citations']=[]
             result['status']='model_error' if result['model_errors'] else 'missing_sources' if result['source_gaps'] or result['legal_issues'] else 'needs_facts' if result['missing_facts'] else 'no_supported_answer'
@@ -178,6 +192,10 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             if attempts:
                 gap['online_state']=attempts[-1]['state']
                 gap['online_detail']=attempts[-1]['note']
+        included={row['id'] for row in evidence}
+        result['evidence_omissions']=[row for row in result['evidence_omissions'] if row['id'] not in included]
+        for row in result['evidence_omissions']:
+            warnings.append(f"用户点名的《{row['name']}》{row['number']}（{row['characters']}字符）超出18000字符上下文预算，未纳入本次分析。请缩小研究范围或切换原文模式查看完整条文；未截断法条。")
         warnings[:]=list(dict.fromkeys(warnings))
         emit('done','研究结束',f"完成 {result['rounds']} 轮、{result['model_calls']} 次模型调用；形成 {len(result['claims'])} 项带引用结论。",'completed' if result['claims'] or not use_model else 'warning')
         result['elapsed_seconds']=round(time.monotonic()-started,2)
@@ -224,7 +242,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
                 # New provisions may contain exceptions to an earlier conclusion.
                 result['claims']=[];result['citations']=[]
                 result.pop('verification',None)
-            emit('source_timing','官方补查耗时',f"耗时 {round(time.monotonic()-source_started,3)} 秒；新增 {len(collector.rows)-before} 条临时原文。",'completed' if len(collector.rows)>before else 'warning')
+            emit('source_timing','官方补查耗时',f"耗时 {round(time.monotonic()-source_started,3)} 秒；新增 {len(collector.rows)-before} 条临时原文。",'completed' if len(collector.rows)>before else 'skipped')
         return bool(new)
 
     def run():

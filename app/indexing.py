@@ -1,7 +1,7 @@
 """Persistent, resumable chunk embeddings with atomic per-article publication."""
 import hashlib
 import json
-import re
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from . import db, llm, retrieval_services as services
@@ -27,6 +27,7 @@ def ensure_schema():
             chunk_no INTEGER NOT NULL,content_hash TEXT NOT NULL,text TEXT NOT NULL,vector TEXT NOT NULL,
             PRIMARY KEY(article_id,fingerprint,chunk_no));
         ''')
+        db.corpus_triggers(c, "article_headings")
 
 
 def articles():
@@ -58,27 +59,25 @@ def chunks(row, size=1200):
     return out
 
 
-def mark_headings(connection, ids, text):
-    """Use only explicitly printed chapter/section lines, never generated titles."""
-    from .ingest import ARTICLE, _reference_reason, normalize
-    text=text.replace('\r\n','\n').replace('\r','\n').replace('\u00a0',' ')
-    offsets={}
-    for match in ARTICLE.finditer(text):
-        if not _reference_reason(text,match):offsets.setdefault(normalize(match[1]),match.start())
-    path=[];positions=[]
-    for m in re.finditer(r'(?m)^\s*(第[零〇一二三四五六七八九十百千万0-9]+(部分|编|章|节)[^\n]{0,90})\s*$',text):
-        level={'部分':0,'编':1,'章':2,'节':3}[m[2]]
-        path=[(n,t) for n,t in path if n<level]+[(level,m[1].strip())]
-        positions.append((m.end(),' / '.join(t for _,t in path)))
+def mark_headings(connection, ids, analysis):
+    """Reuse the parser's accepted article offsets and structural headings."""
     for aid,number,body in ids:
-        at=offsets.get(number,-1)
-        if at<0:continue
-        title=next((p for i,p in reversed(positions) if i<=at),'')
+        title=analysis["heading_paths"].get(number,"")
         connection.execute('INSERT OR REPLACE INTO article_headings VALUES(?,?)',(aid,title))
 
 
 def status():
-    ensure_schema();s=services.settings();fp=services.fingerprint(s);rows=articles()
+    ensure_schema()
+    try:
+        s=services.settings()
+    except ValueError as exc:
+        s=services.public_settings();rows=articles()
+        return {'configured':False,'configuration_error':str(exc),'mode':s['mode'],
+                'embedding_model':s['embedding']['model'],'reranker_model':s['reranker']['model'],
+                'fingerprint':'','total':len(rows),'ready':0,'failed':0,'pending':len(rows),'chunks':0,
+                'errors':[{'article':'检索服务配置','error':str(exc)}],'job':db.get('embedding_job',{}),
+                'auto_index':s['auto_index'],'legacy_vectors_ignored':True}
+    fp=services.fingerprint(s);rows=articles()
     with db.connect() as c:
         states={r['article_id']:dict(r) for r in c.execute('SELECT * FROM embedding_states WHERE fingerprint=?',(fp,))}
         chunk_count=c.execute('SELECT COUNT(*) FROM embedding_chunks WHERE fingerprint=?',(fp,)).fetchone()[0]
@@ -99,10 +98,14 @@ def status():
 
 def load_vectors(rows,s):
     fp=services.fingerprint(s);wanted={r['id']:content_hash(r) for r in rows}
+    ids=list(wanted)
     with db.connect() as c:
-        data=c.execute('''SELECT e.* FROM embedding_chunks e JOIN embedding_states s
-          ON s.article_id=e.article_id AND s.fingerprint=e.fingerprint AND s.content_hash=e.content_hash
-          WHERE e.fingerprint=? AND s.status='ready' ''',(fp,)).fetchall()
+        data=[]
+        for start in range(0,len(ids),800):
+            batch=ids[start:start+800]
+            data.extend(c.execute('''SELECT e.* FROM embedding_chunks e JOIN embedding_states s
+              ON s.article_id=e.article_id AND s.fingerprint=e.fingerprint AND s.content_hash=e.content_hash
+              WHERE e.fingerprint=? AND s.status='ready' AND e.article_id IN ('''+','.join('?' for _ in batch)+')',(fp,*batch)))
     result=[]
     for row in data:
         if wanted.get(row['article_id'])!=row['content_hash']:continue
@@ -113,6 +116,7 @@ def load_vectors(rows,s):
 
 
 def build(*, retry_failed=True, check=lambda:None):
+    check()
     ensure_schema();s=services.settings();fp=services.fingerprint(s)
     if s['embedding']['provider']=='none':raise ValueError('请先配置并保存独立向量服务')
     rows=articles()
@@ -120,7 +124,7 @@ def build(*, retry_failed=True, check=lambda:None):
         states={r['article_id']:dict(r) for r in c.execute('SELECT * FROM embedding_states WHERE fingerprint=?',(fp,))}
     pending=[r for r in rows if r['id'] not in states or states[r['id']]['content_hash']!=content_hash(r) or (states[r['id']]['status']!='ready' and (retry_failed or states[r['id']]['status']!='failed'))]
     job={'status':'running','fingerprint':fp,'total':len(pending),'completed':0,'failed':0,'started':db.now()}
-    db.put('embedding_job',job);count=0
+    check();db.put('embedding_job',job);count=0
     records={};batches=[];batch=[]
     for row in pending:
         texts=chunks(row,s['chunk_chars']);digest=content_hash(row)
@@ -210,6 +214,11 @@ def _worker():
         job=db.get('embedding_job',{});job.update(status='failed',error='索引任务未完成，请检查服务日志后重试',finished=db.now());db.put('embedding_job',job)
     finally:
         with _guard:
+            if _stop.is_set():
+                job=db.get('embedding_job',{})
+                if job.get('status') in ('queued','running'):
+                    job.update(status='interrupted',finished=db.now())
+                    db.put('embedding_job',job)
             _thread=None
             reschedule=_requested.is_set() and not _stop.is_set()
             retry=_retry
@@ -218,12 +227,21 @@ def _worker():
 
 def start(*, manual=False):
     global _thread,_retry
-    s=services.settings()
+    try:
+        s=services.settings()
+    except ValueError as exc:
+        if manual:raise
+        logging.getLogger('lexcite').error('自动索引未启动：%s',exc)
+        db.put('embedding_job',{'status':'failed','error':str(exc),'finished':db.now()})
+        return
     if s['embedding']['provider']=='none':
         if manual:raise ValueError('请先配置并保存独立向量服务')
         return
     if not manual and (not s['auto_index'] or s['mode']=='lexical'):return
     with _guard:
+        if _thread and _thread.is_alive() and _stop.is_set():
+            if manual:raise ValueError('索引正在停止，请等待当前请求结束后再建立索引')
+            return
         _requested.set();_retry=_retry or manual
         if _thread and _thread.is_alive():return
         _stop.clear()
@@ -232,7 +250,13 @@ def start(*, manual=False):
 
 
 def cancel():
-    _stop.set();_requested.clear()
+    global _retry
+    with _guard:
+        _stop.set();_requested.clear();_retry=False
+        job=db.get('embedding_job',{})
+        if job.get('status') in ('queued','running'):
+            job.update(status='interrupted',finished=db.now())
+            db.put('embedding_job',job)
 
 
 def stop():

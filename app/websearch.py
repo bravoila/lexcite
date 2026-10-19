@@ -4,32 +4,42 @@ import json
 import os
 import httpx
 from . import db, llm, sources, ingest
-from .models import SearchSettingsInput
+from .models import SearchSettingsInput, validate_configuration
 
 
 class SearchError(Exception):
     pass
 
 
-def settings():
+def settings(*, validate=True):
     stored = db.get("search_settings", {})
     result = SearchSettingsInput().model_dump() | stored
     env_values = {}
     for field, name in (("provider", "SEARCH_PROVIDER"), ("base_url", "SEARCH_BASE_URL"), ("timeout", "SEARCH_TIMEOUT")):
         value = os.getenv(name)
         if field not in stored and value:
-            env_values[field] = int(value) if field == "timeout" else value
-    if env_values:
-        validated = SearchSettingsInput.model_validate(result | env_values).model_dump()
-        result.update({field: validated[field] for field in env_values})
-    return result
+            env_values[field] = value
+    result.update(env_values)
+    return validate_configuration(SearchSettingsInput, result, "联网搜索") if validate else result
+
+
+def environment_api_key(s):
+    defaults = SearchSettingsInput().model_dump()
+    provider = os.getenv("SEARCH_PROVIDER") or defaults["provider"]
+    endpoint = (os.getenv("SEARCH_BASE_URL") or defaults["base_url"]).rstrip("/")
+    bound = s["provider"] != "none" and s["provider"] == provider and s["base_url"].rstrip("/") == endpoint
+    return (os.getenv("SEARCH_API_KEY") or "") if bound and not s.get("environment_key_disabled") else ""
 
 
 def public_settings():
-    s = settings()
+    s = settings(validate=False)
+    try:
+        s = validate_configuration(SearchSettingsInput, s, "联网搜索")
+    except ValueError as exc:
+        s["configuration_error"] = str(exc)
     stored = db.get("search_settings", {})
     encrypted = s.pop("api_key_encrypted", "")
-    uses_environment_key = not encrypted and bool(os.getenv("SEARCH_API_KEY"))
+    uses_environment_key = not encrypted and bool(environment_api_key(s))
     s["environment_defaults"] = any(
         field not in stored and bool(os.getenv(name))
         for field, name in (("provider", "SEARCH_PROVIDER"), ("base_url", "SEARCH_BASE_URL"), ("timeout", "SEARCH_TIMEOUT"))
@@ -37,11 +47,13 @@ def public_settings():
     s["environment_api_key"] = uses_environment_key
     s["has_api_key"] = bool(uses_environment_key or encrypted)
     s.pop("api_key", None)
+    s.pop("environment_key_disabled", None)
     return s
 
 
 def save_settings(value):
-    old = db.get("search_settings", {})
+    old = settings(validate=False)
+    value = validate_configuration(SearchSettingsInput, dict(value), "联网搜索")
     key = value.pop("api_key", None)
     same = all(value.get(k) == old.get(k) for k in ("provider", "base_url"))
     if key is not None:
@@ -50,6 +62,7 @@ def save_settings(value):
         value["api_key_encrypted"] = old["api_key_encrypted"]
     elif not same:
         value["api_key_encrypted"] = ""
+    value["environment_key_disabled"] = key == "" or (key is None and old.get("environment_key_disabled", False))
     db.put("search_settings", value)
 
 
@@ -71,7 +84,7 @@ def search(query, check=lambda: None, timeout=None):
             except Exception as exc:
                 raise SearchError("请在联网设置中保存博查 API 密钥") from exc
         else:
-            key = os.getenv("SEARCH_API_KEY") or ""
+            key = environment_api_key(s)
         if not key:
             raise SearchError("请在联网设置中保存博查 API 密钥")
         headers["Authorization"] = "Bearer " + key

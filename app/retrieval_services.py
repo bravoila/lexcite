@@ -9,7 +9,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Literal
 from . import db, llm
-from .models import SettingsInput
+from .models import SettingsInput, validate_configuration
 
 INSTRUCTION = 'Given a Chinese legal question, retrieve statutory provisions that address the issue, including applicable conditions and exceptions.'
 
@@ -24,13 +24,10 @@ class Service(BaseModel):
     revision: str = Field(default='', max_length=100)
     query_instruction: str = Field(default='', max_length=700)
 
-    @field_validator('base_url')
-    @classmethod
-    def endpoint(cls, value):
-        return SettingsInput.endpoint(value)
-
     @model_validator(mode='after')
     def configured(self):
+        if self.provider != 'none':
+            self.base_url = SettingsInput.endpoint(self.base_url)
         if self.provider != 'none' and not self.model.strip():
             raise ValueError('启用服务时必须填写模型名称')
         self.model=self.model.strip()
@@ -56,7 +53,7 @@ class RetrievalSettings(BaseModel):
         return self
 
 
-def settings():
+def settings(*, validate=True):
     stored=db.get('retrieval_settings', {})
     base=RetrievalSettings().model_dump()
     for key in ('embedding','reranker'):
@@ -69,19 +66,38 @@ def settings():
         for field,suffix in (('provider','PROVIDER'),('base_url','BASE_URL'),('model','MODEL'),('timeout','TIMEOUT')):
             name=f'{prefix}_{suffix}';value=os.getenv(name)
             if field not in saved and value:
-                env_values[field]=int(value) if field=='timeout' else value
-        if env_values:
-            validated=Service.model_validate(cfg | env_values).model_dump()
-            base[kind].update({field:validated[field] for field in env_values})
-    return base
+                env_values[field]=value
+        cfg.update(env_values)
+    if not validate:
+        return base
+    result = validate_configuration(RetrievalSettings, base, "检索服务")
+    for kind in ('embedding', 'reranker'):
+        result[kind].update({key: base[kind][key] for key in ('api_key_encrypted', 'environment_key_disabled') if key in base[kind]})
+    return result
+
+
+def environment_api_key(kind, cfg):
+    prefix = 'EMBEDDING' if kind == 'embedding' else 'RERANKER'
+    defaults = Service().model_dump()
+    provider = os.getenv(prefix + '_PROVIDER') or defaults['provider']
+    endpoint = (os.getenv(prefix + '_BASE_URL') or defaults['base_url']).rstrip('/')
+    bound = cfg['provider'] != 'none' and cfg['provider'] == provider and cfg['base_url'].rstrip('/') == endpoint
+    return (os.getenv(prefix + '_API_KEY') or '') if bound and not cfg.get('environment_key_disabled') else ''
 
 
 def public_settings():
-    s=settings()
+    s=settings(validate=False)
+    try:
+        s = validate_configuration(RetrievalSettings, s, "检索服务") | {
+            kind: validate_configuration(Service, s[kind], "向量" if kind == 'embedding' else "重排")
+            for kind in ('embedding', 'reranker')
+        }
+    except ValueError as exc:
+        s['configuration_error'] = str(exc)
     stored=db.get('retrieval_settings',{})
     for kind in ('embedding','reranker'):
         cfg=s[kind]
-        env_key=os.getenv('EMBEDDING_API_KEY' if kind=='embedding' else 'RERANKER_API_KEY')
+        env_key=environment_api_key(kind,cfg)
         encrypted=cfg.pop('api_key_encrypted','')
         uses_environment_key=not encrypted and bool(env_key)
         cfg['environment_defaults']=any(
@@ -91,12 +107,13 @@ def public_settings():
         cfg['environment_api_key']=uses_environment_key
         cfg['has_api_key']=bool(uses_environment_key or encrypted)
         cfg.pop('api_key',None)
+        cfg.pop('environment_key_disabled',None)
     return s
 
 
 def save_settings(value):
     value=RetrievalSettings.model_validate(value).model_dump()
-    old=settings()
+    old=settings(validate=False)
     old_stored=db.get('retrieval_settings',{})
     for kind in ('embedding','reranker'):
         cfg=value[kind];key=cfg.pop('api_key',None)
@@ -107,6 +124,7 @@ def save_settings(value):
             cfg['api_key_encrypted']=old_stored[kind]['api_key_encrypted']
         elif not same:
             cfg['api_key_encrypted']=''
+        cfg['environment_key_disabled'] = key == '' or (key is None and old[kind].get('environment_key_disabled', False))
     db.put('retrieval_settings', value)
     return public_settings()
 
@@ -126,13 +144,13 @@ def init():
 
 def resolve(kind, cfg=None):
     cfg=dict(cfg or settings()[kind])
-    env_name='EMBEDDING_API_KEY' if kind=='embedding' else 'RERANKER_API_KEY'
+    cfg=validate_configuration(Service,cfg,'向量' if kind=='embedding' else '重排')
     key=cfg.get('api_key') or ''
     if not key and cfg.get('api_key_encrypted'):
         try:key=llm.cipher().decrypt(cfg['api_key_encrypted'].encode()).decode()
         except Exception as exc:raise llm.ModelError('检索服务密钥无法解密，请重新保存该服务密钥') from exc
     if not key:
-        key=os.getenv(env_name) or ''
+        key=environment_api_key(kind,cfg)
     cfg['api_key']=key
     return cfg
 

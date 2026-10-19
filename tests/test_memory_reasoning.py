@@ -8,7 +8,7 @@ import httpx
 import pytest
 from app import db, llm
 from app.research_agent import context as case_state, runner as engine, retrieval
-from app.research_agent.schemas import CoverageAudit, FactExtraction, Plan, Draft, Verdict, ClarificationAudit
+from app.research_agent.schemas import FactExtraction, Plan, Draft, Verdict, ClarificationAudit
 
 FACTS = '彩礼给付以结婚为目的\n双方已办理结婚登记手续\n婚后共同生活\n彩礼是否导致给付方生活困难 未知'
 QUESTIONS = ['双方是否已办理结婚登记手续？', '双方婚后是否实际共同生活？', '彩礼给付是否导致给付方生活困难？']
@@ -69,7 +69,6 @@ def test_screenshot_repeat_questions_removed_end_to_end(client,corpus,monkeypatc
     cid=create(client);message(cid,'离婚时彩礼能否返还？');inputs=[]
     def model(system,payload,schema,verify=False):
         inputs.append(payload)
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[x['id'] for x in payload['candidate_evidence']],coverage='sufficient',reason='Synthetic protocol fixture; not a legal assessment')
         if schema is FactExtraction:return FactExtraction(intent='supplement',facts=[])
         if schema is Plan:return Plan(queries=['未支付价款'],questions=QUESTIONS)
         if schema is Draft:return Draft(insufficient=True,missing_facts=QUESTIONS+['彩礼给付日期是什么时候？'])
@@ -181,11 +180,11 @@ def test_reasoning_job_stream_persistence_and_disabled(client,monkeypatch,enable
 
 def test_reasoning_budget_and_unavailable_are_honest(client,monkeypatch):
     cid=create(client)
-    def model(*args,**kwargs):llm.report_reasoning('测'*30000);return Plan()
+    def model(system,payload,schema,verify=False):llm.report_reasoning('测'*30000);return schema()
     monkeypatch.setattr(llm,'request_json',model)
     value=engine.answer(cid,'未支付价款怎么办？')
     assert len(value['reasoning'][0]['text'])==24000 and value['reasoning'][0]['truncated']
-    monkeypatch.setattr(llm,'request_json',lambda *args,**kwargs:Plan())
+    monkeypatch.setattr(llm,'request_json',lambda system,payload,schema,verify=False:schema())
     value=engine.answer(cid,'未支付价款怎么办？')
     assert value['reasoning'][0]['status']=='unavailable' and value['reasoning'][0]['text']==''
 

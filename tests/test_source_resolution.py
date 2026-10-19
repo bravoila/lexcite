@@ -8,7 +8,7 @@ import pytest
 from app import db, ingest, llm, sources, websearch
 from app.research_agent import authorities, runner as engine, retrieval
 from app.law_names import clean_title, display_title
-from app.research_agent.schemas import AuthorityNeed, Plan, CoverageAudit, Draft, Verdict
+from app.research_agent.schemas import AuthorityNeed, Plan, Draft, Verdict
 
 from source_fixture_data import CRIMINAL, BASIS, CRIMINAL_TEXT
 
@@ -145,7 +145,6 @@ def test_engine_criminal_two_requested_articles_with_citations(client,monkeypatc
     monkeypatch.setattr(sources,'read_official',mock_page)
     def model(system,payload,schema,verify=False):
         if schema is Plan:return Plan(queries=['过失致人死亡'],authorities=[{'name':'《中华人民共和国刑法》','articles':['第十五条','第二百三十三条']}])
-        if schema is CoverageAudit:return CoverageAudit(selected_ids=[r['id'] for r in payload['candidate_evidence'] if ingest.article_key(r['number']) in [(15,0),(233,0)]],coverage='sufficient',reason='合成管线测试')
         if schema is Draft:
             selected=[r for r in payload['evidence'] if ingest.article_key(r['number']) in [(15,0),(233,0)]]
             if len(selected)<2:return Draft(missing_authorities=[{'name':'中华人民共和国刑法','articles':['第十五条','第二百三十三条']}])

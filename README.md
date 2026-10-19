@@ -2,7 +2,7 @@
 
 面向中文法律工作者的可自行部署研究工作台。完整前后端、数据库、中文界面、启动脚本、测试与说明均在此项目内。
 
-**当前版本：1.3.2。** 新增独立向量与重排配置、后台增量索引、BM25＋向量＋精确条号混合召回、RRF与重排，以及每次研究的实际检索记录。1.3.1 增加服务器端 `.env` 密钥读取和有界并发批量索引；1.3.2 增加本地/API 双配置档。模型设置中先选“本地模型”或“云端 API”，服务商、地址、模型名随之切换；Embedding 与重排继续独立配置。升级步骤见 [UPGRADE_1.3.0.md](docs/UPGRADE_1.3.0.md)，检索配置见 [RETRIEVAL.md](docs/RETRIEVAL.md)，实测范围见 [验证记录](docs/VERIFICATION.md)。
+**当前版本：1.4.0。** 本版修复登录与反代边界、环境密钥端点绑定、法规拆条与附件读取、跨法规条号误匹配、任务取消和网页异步状态；增加有界重试、检索缓存及明确的超预算提示。保留本地/API 双配置档、独立向量与重排、混合召回和完整引用。升级步骤见 [UPGRADE_1.4.0.md](docs/UPGRADE_1.4.0.md)，检索配置见 [RETRIEVAL.md](docs/RETRIEVAL.md)，实测与待验范围见 [1.4.0 验证记录](docs/VERIFICATION_1.4.0.md)。
 
 ## 已实现
 
@@ -27,7 +27,13 @@ docker compose up -d --build
 docker compose logs --tail=20 lexcite
 ```
 
-打开 **http://localhost:8080**，复制日志中的一次性初始化码，设置至少12字符的工作空间密码。
+打开 **http://localhost:8080**。服务就绪后，由部署管理员读取一次性初始化码，再在网页设置至少12字符的工作空间密码：
+
+```bash
+docker compose exec lexcite cat data/setup-code.txt
+```
+
+初始化码**不会写入日志**；成功初始化后文件删除。直接 Python 部署时读取 `data/setup-code.txt`（自定义数据目录则读取该目录中的同名文件）。不要公开初始化页面、初始化码或数据卷。
 
 Windows 可双击 `start.bat`；macOS/Linux 可运行 `bash start.sh`。如果已经通过 `.env` 配置 `LEXCITE_ADMIN_PASSWORD`，直接用该密码登录。
 
@@ -58,11 +64,11 @@ docker compose -f compose.yaml -f compose.ollama.yaml exec ollama ollama pull qw
 
 首次可先关闭自动索引 → 保存 → 分别测试 → 点击“建立 / 补齐向量索引”。完成后开启自动索引。答案的“本次实际检索”应显示真正使用的向量/重排模型；填写hybrid不等于已启用语义召回。
 
-项目根目录 `.env` 按分析模型的本地/API 两种运行方式，以及 Embedding、Reranker、Search 分组配置默认 provider、地址、模型和 API 密钥。模型设置先选“本地模型”或“云端 API”，再选具体服务；页面保存值优先于 `.env` 默认值。Docker Compose 与直接 Python 启动都会读取。密钥只由服务端使用，页面不会读取或回显明文；`.env` 已被 Git 忽略。索引后台最多并行4个请求、每次提交8个片段；中断后再次建立索引会从未完成的法条继续。
+项目根目录 `.env` 按分析模型的本地/API 两种运行方式，以及 Embedding、Reranker、Search 分组配置默认 provider、地址、模型和 API 密钥。模型设置先选“本地模型”或“云端 API”，再选具体服务；页面保存值优先于 `.env` 默认值。Docker Compose 与直接 Python 启动都会读取。密钥只由服务端使用，页面不会读取或回显明文；`.env` 已被 Git 忽略。**环境密钥也绑定服务商和地址，分析密钥另绑定配置档；更换端点不会继承旧密钥。** 索引后台最多并行4个请求、每次提交8个片段；中断后再次建立索引会从未完成的法条继续。
 
-HTML教程的第3A章（国产API）和第3B章（本地）均按“分析模型 / Embedding / Rerank”三个标签配置；第7章统一完成索引与维护。宿主机Python法据连接重排容器的步骤也已包含。教程结构更新日期：2026-09-28。
+HTML教程的第3A章（国产API）和第3B章（本地）均按“分析模型 / Embedding / Rerank”三个标签配置；第7章统一完成索引与维护。宿主机Python法据连接重排容器的步骤也已包含；1.4.0 初始化指引已改为读取码文件。
 
-本地三服务组合与字段逐项填法见 [升级说明](docs/UPGRADE_1.3.0.md) 及 [HTML手把手教程](docs/LexCite_Step_by_Step_Guide.html#advanced)。当前默认CPU重排尚未用真实权重测性能；检索配置成功与法律准确率是两个不同验收目标。
+本地三服务组合与字段逐项填法见 [检索配置](docs/RETRIEVAL.md) 及 [HTML手把手教程](docs/LexCite_Step_by_Step_Guide.html#advanced)。真实权重、目标机器性能与法律准确率须分别验收，不能由合成流程测试代替。
 
 ## 开启联网后，为什么仍可能缺法源？
 
@@ -102,7 +108,7 @@ HTML教程的第3A章（国产API）和第3B章（本地）均按“分析模型
 | `docs/LexCite_Step_by_Step_Guide.html` | 可离线阅读的完整图文教程；阿里、DeepSeek、硅基流动可切换，含 Ollama 与联网配置 |
 | `docs/AGENT_AND_SEARCH.md` | 研究循环、进度 API、模型思考适配及联网限制 |
 | `docs/USER_GUIDE.md` | 面向不懂编码用户的操作说明 |
-| `docs/VERIFICATION.md` | 实际验证结果、未测试事项与上线边界 |
+| `docs/VERIFICATION_1.4.0.md` | 本版实际验证结果、复现命令、未测试事项与上线边界 |
 | `tests/` | 引用造假、有效期、记忆隔离、失败回退等测试 |
 | `evals/`、`scripts/evaluate.py` | 自有案例评测入口和示例数据 |
 
@@ -112,7 +118,7 @@ HTML教程的第3A章（国产API）和第3B章（本地）均按“分析模型
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8080 --workers 1 --no-proxy-headers --forwarded-allow-ips=
 ```
 
 另开终端运行：
@@ -121,7 +127,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
 python -m pytest -q
 ```
 
-可选网页交互测试：安装Node.js 20或更高版本后运行`npm ci`，再运行`python scripts/test_ui.py`。测试会自动启动独立临时服务。具体测试结果和未测试事项见[验证记录](docs/VERIFICATION.md)。
+可选网页交互测试：安装Node.js 20或更高版本后运行`npm ci`，再运行`npm run test:ui`，涵盖异步可靠性与真实HTTP交互两组DOM检查。测试使用独立夹具与临时服务，不会调用真实模型。Chromium 流程和隔离Docker/TLS部署检查的复现命令见[1.4.0 验证记录](docs/VERIFICATION_1.4.0.md)；[旧验证记录](docs/VERIFICATION.md)仅代表1.3.0历史范围。
 
 ## 使用范围
 

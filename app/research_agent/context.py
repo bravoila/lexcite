@@ -10,6 +10,7 @@ UNKNOWN = re.compile(r"未知|不清楚|不确定|不知道|尚未查明|尚不�
 QUESTION = re.compile(r"[?？]|是否|能否|如何|怎么|可否|吗[。！!\s]*$")
 META = re.compile(r"之前.*告诉|不是.*说过|已经.*告诉|^(?:请)?(?:继续|接着)(?:分析|研究|说|干)?[。！!\s]*$|为什么.*重复|我说过|上面.*说")
 SHORT_REPLY = re.compile(r"^(?:办了|没有|有|是|否|不是|已办理|未办理|不知道|不清楚|未知|不确定|对|不对)[。！!\s]*$")
+REQUEST = re.compile(r"^(?:请|麻烦|帮我|帮忙|能不能|能否|可否)|^(?:再|进一步|具体|详细|简要|首先|然后|接着)?(?:分析|解释|说明|判断|给出|研究|继续|讨论|论述|概述|简述|回答|告诉|列出|举例|说说)")
 
 
 def signature(text):
@@ -30,7 +31,21 @@ def sentences(text):
     return [x.strip() for x in re.split(r"[\n\r；;。]", text) if 3 <= len(x.strip()) <= 800]
 
 
-def question_answer_pairs(text):
+def question_answer_pairs(text, prior_questions=()):
+    def is_answer(fragment, question):
+        if re.match(r"^(?:答|答复|回答|更正|纠正)[:：，,]", fragment):
+            return True
+        if REQUEST.search(fragment) or QUESTION.search(fragment):
+            return False
+        if SHORT_REPLY.fullmatch(fragment) or re.fullmatch(r"(?:大约|约|共|近)?(?:[零〇一二三四五六七八九十百千万两0-9.]+(?:年|个月|月|日|天|万元|元|岁|人|次))+(?:左右|多|余)?", fragment):
+            return True
+        if len(fragment) <= 40 and re.match(r"^(?:已|未|没有|不存在|存在)", fragment):
+            return True
+        if any(signature(question) == signature(q) for q in prior_questions):
+            return True
+        answer_key, question_key = signature(fragment), signature(question)
+        return any(re.search(r"[\u4e00-\u9fff]{3}", answer_key[i:i+3]) and answer_key[i:i+3] in question_key for i in range(len(answer_key)-2))
+
     pairs, pending, start = [], "", 0
     for match in re.finditer(r"([^。；;\n？?]+)([？?。；;\n]|$)", text):
         fragment, delimiter = match[1].strip(), match[2]
@@ -48,7 +63,9 @@ def question_answer_pairs(text):
             else:
                 pending, start = fragment + delimiter, match.start()
         elif pending and fragment:
-            pairs.append({'question':pending, 'answer':fragment, 'quote':text[start:match.end()].strip(), 'start':start, 'end':match.end()})
+            if is_answer(fragment, pending):
+                answer = re.sub(r"^(?:答|答复|回答)[:：]\s*", "", fragment)
+                pairs.append({'question':pending, 'answer':answer, 'quote':text[start:match.end()].strip(), 'start':start, 'end':match.end()})
             pending = ''
     return pairs
 
@@ -95,7 +112,7 @@ def load(case_id, question, memories):
     sources.extend({'id':'memory:'+m['id'],'text':m['text'],'kind':'confirmed','pending':[]} for m in memories)
     observations, focus, qa_count = [], '', 0
     for source in sources:
-        text = source['text']; pairs = question_answer_pairs(text)
+        text = source['text']; pairs = question_answer_pairs(text, [q["text"] for q in source['pending']])
         if not pairs and SHORT_REPLY.fullmatch(text.strip()) and len(source['pending'])==1:
             pairs=[{'question':source['pending'][0]['text'],'answer':text.strip(),'quote':text.strip(),'start':0,'end':len(text)}]
         for pair in pairs:
@@ -105,15 +122,18 @@ def load(case_id, question, memories):
             remainder[pair['start']:pair['end']] = ' '*(pair['end']-pair['start'])
         rest=''.join(remainder)
         for quote in sentences(rest):
-            if (QUESTION.search(quote) and not UNKNOWN.search(quote)) or META.search(quote):continue
+            if (QUESTION.search(quote) and not UNKNOWN.search(quote)) or META.search(quote) or REQUEST.search(quote):continue
             item=observation(source,quote)
             if len(item['topic'])>=3:observations.append(item)
         if source['kind']=='user':
             for line in sentences(rest):
                 if META.search(line) or UNKNOWN.search(line):continue
                 if QUESTION.search(line) and not SHORT_REPLY.fullmatch(line):focus=line
-    if not focus:
-        focus=next((s['text'][:800] for s in sources if s['kind']=='user' and s['text'].strip() and not META.search(s['text'])),question)
+    if REQUEST.search(question.strip()) and not META.search(question):
+        focus = question
+    elif not focus:
+        focus = question if question.strip() and not META.search(question) and not SHORT_REPLY.fullmatch(question.strip()) else next(
+            (s['text'][:800] for s in reversed(sources) if s['kind']=='user' and s['text'].strip() and not META.search(s['text']) and not SHORT_REPLY.fullmatch(s['text'].strip())), question)
     refs={s['id']:s for s in sources}
     # Reuse only saved observations still grounded in the original USER source.
     if snapshot:

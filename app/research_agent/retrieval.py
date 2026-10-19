@@ -6,12 +6,19 @@ import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import lru_cache
 import jieba
 from .. import db, llm
 from ..ingest import normalize, NUM, article_key
 
 jieba.setLogLevel(30)
 STOP = set("的 了 是 在 和 与 或 及 有 无 如何 什么 是否 这个 那个 我 他 她 它 可以 应该 需要 根据 请 分析 规定 法律 法条 第 条".split())
+ARTICLE_REFERENCE = re.compile(r"(?:第"+NUM+r"|[0-9０-９]+)条(?:之"+NUM+r")?")
+REFERENCE_NAMES = {
+    "本法", "该法", "此法", "本法典", "该法典", "本条例", "该条例", "本规定", "该规定", "本办法", "该办法",
+    "本解释", "该解释", "本规则", "该规则", "本细则", "该细则", "有关规定", "法律规定", "相关法律", "有关法律",
+    "相关司法解释", "有关司法解释", "司法解释", "合同规定", "合同约定", "协议规定", "协议约定",
+}
 
 
 def tokens(text):
@@ -34,29 +41,88 @@ def matches_law(row, name):
     return law_key(name) in {law_key(n) for n in law_names(row)}
 
 
+def law_mentions(query, rows, extra_names=()):
+    text = normalize(query)
+    mentions, stack = [], []
+    for i, char in enumerate(text):
+        if char == "《":
+            stack.append(i)
+        elif char == "》" and stack:
+            start = stack.pop()
+            if not stack and 2 <= i-start-1 <= 220:
+                mentions.append({"start": start, "end": i+1, "name": text[start+1:i]})
+    explicit = list(mentions)
+    names = {n for row in rows for n in law_names(row)} | set(extra_names)
+    for name in sorted(names, key=len, reverse=True):
+        key = law_key(name)
+        if len(key) < 2:
+            continue
+        variants = {key, key.replace("解释1", "解释一").replace("解释2", "解释二")}
+        for variant in variants:
+            pattern = r"[《》〈〉（）()·]*".join(re.escape(c) for c in variant)
+            for match in re.finditer(pattern, text):
+                if any(m["start"] <= match.start() and match.end() <= m["end"] for m in mentions):
+                    continue
+                mentions.append({"start": match.start(), "end": match.end(), "name": name})
+    suffix = r"(?:法典|法|条例|规定|办法|解释(?:[（(][一二三四五六七八九十0-9]+[）)])?|规则|细则|决定|决议|公约|条约|通则|典|规范|准则|协定)"
+    for match in re.finditer(r"([一-鿿]{0,70}"+suffix+r")[：:（）()，,、]*?(?=(?:第"+NUM+r"|[0-9０-９]+)条)", text):
+        start, end = match.span(1)
+        if any(m["start"] <= start and end <= m["end"] for m in explicit):
+            continue
+        if any(start <= m["start"] and m["end"] == end for m in mentions):
+            continue
+        name = match[1]
+        name = re.sub(r"^.*(?:法|典|条|条例|规定)(?:和|与|及)", "", name)
+        while True:
+            cleaned = re.sub(r"^(?:根据|依据|依照|按照|参照|适用|结合|对照|比较|分析|关于|以及|或者|和|与|及|或|在|请)", "", name)
+            if cleaned == name:
+                break
+            name = cleaned
+        if len(name) < 2 or name in REFERENCE_NAMES:
+            continue
+        mentions.append({"start": end-len(name), "end": end, "name": name})
+    return sorted(mentions, key=lambda m: (m["start"], -m["end"]))
+
+
+def article_bindings(query, rows, extra_names=()):
+    text = normalize(query)
+    mentions = law_mentions(text, rows, extra_names)
+    bindings = []
+    for match in ARTICLE_REFERENCE.finditer(text):
+        if any(m["start"] <= match.start() < m["end"] for m in mentions):
+            continue
+        preceding = [m for m in mentions if m["end"] <= match.start() and not re.search(r"[。；;！？!?\n]", text[m["end"]:match.start()])]
+        subject = max(preceding, key=lambda m: m["end"])["name"] if preceding else None
+        label = match[0] if match[0].startswith("第") else "第"+match[0]
+        bindings.append((article_key(label), subject))
+    return bindings, mentions
+
+
 def query_laws(query, rows):
-    explicit = re.findall(r"《([^》]{2,220})》", query)
-    if explicit:
-        return explicit
-    names = sorted({n for row in rows for n in law_names(row) if law_key(n) in law_key(query)}, key=len, reverse=True)
-    selected = []
-    for name in names:
-        if not any(law_key(name) in law_key(other) for other in selected):
-            selected.append(name)
-    return selected
+    return list(dict.fromkeys(m["name"] for m in law_mentions(query, rows)))
+
+
+@lru_cache(maxsize=4)
+def _catalogue(path, revision):
+    with db.connect() as c:
+        return tuple(dict(row) for row in c.execute("SELECT id,name,canonical_name FROM laws"))
 
 
 def authority_gaps(needs, event_date, jurisdiction):
-    with db.connect() as c:
-        laws = [dict(x) for x in c.execute("SELECT * FROM laws")]
-        article_numbers = defaultdict(set)
-        for row in c.execute("SELECT law_id,number FROM articles"):
-            article_numbers[row[0]].add(article_key(row[1]))
+    needs = [need.model_dump() if hasattr(need, "model_dump") else need for need in needs]
+    wanted = {law_key(need["name"]) for need in needs}
+    if not wanted:
+        return []
     eligible, _ = corpus(event_date, jurisdiction)
     available = {r['law_id'] for r in eligible}
+    laws = [law for law in _catalogue(*db.corpus_version()) if any(law_key(n) in wanted for n in law_names(law))]
+    usable_ids = {law["id"] for law in laws if law["id"] in available}
+    article_numbers = defaultdict(set)
+    for row in eligible:
+        if row["law_id"] in usable_ids:
+            article_numbers[row["law_id"]].add(article_key(row["number"]))
     output = []
     for need in needs:
-        need = need.model_dump() if hasattr(need,'model_dump') else need
         matching = [l for l in laws if matches_law(l, need['name'])]
         usable = [l for l in matching if l['id'] in available]
         absent = [n for n in need.get('articles',[]) if not any(article_key(n) in article_numbers[l['id']] for l in usable)]
@@ -77,24 +143,24 @@ def requested_articles(needs, event_date, jurisdiction):
     selected = []
     for need in needs:
         numbers = {article_key(n) for n in need.get('articles', [])}
-        selected.extend(r for r in rows if matches_law(r, need['name']) and article_key(r['number']) in numbers)
+        selected.extend(r | {"requested": True} for r in rows if matches_law(r, need['name']) and article_key(r['number']) in numbers)
     return selected
 
 
 def corpus(event_date, jurisdiction):
     cutoff = (dt.date.today() - dt.timedelta(days=llm.settings()["review_days"])).isoformat()
+    rows, warnings = _corpus(*db.corpus_version(), event_date, jurisdiction, cutoff)
+    return [dict(row) for row in rows], list(warnings)
+
+
+@lru_cache(maxsize=4)
+def _corpus(path, revision, event_date, jurisdiction, cutoff):
     with db.connect() as c:
-        laws = [dict(x) for x in c.execute("SELECT * FROM laws")]
-        eligible, warnings = [], []
-        for law in laws:
-            if law["jurisdiction"] not in ("全国", jurisdiction):
-                continue
-            if law["valid_from"] > event_date or (law["valid_to"] and law["valid_to"] <= event_date):
-                continue
-            if not law["reviewed_at"] or law["reviewed_at"][:10] < cutoff:
-                warnings.append(f"《{law['name']}》{law['version']} 尚未复核或复核已过期，本次排除。")
-                continue
-            eligible.append(law)
+        condition = "jurisdiction IN ('全国',?) AND valid_from<=? AND (valid_to IS NULL OR valid_to>?)"
+        parameters = (jurisdiction, event_date, event_date, cutoff)
+        eligible = [dict(x) for x in c.execute("SELECT * FROM laws WHERE "+condition+" AND reviewed_at>=?", parameters)]
+        warnings = [f"《{law['name']}》{law['version']} 尚未复核或复核已过期，本次排除。"
+                    for law in c.execute("SELECT name,version FROM laws WHERE "+condition+" AND (reviewed_at IS NULL OR reviewed_at<?)", parameters)]
         groups = defaultdict(list)
         for law in eligible:
             groups[(law_key(law.get("canonical_name") or law["name"]), law["jurisdiction"])].append(law["id"])
@@ -102,10 +168,15 @@ def corpus(event_date, jurisdiction):
         if blocked:
             warnings.append("发现同名法规有多个版本在所选日期同时有效，已排除冲突法规；请校对有效期。")
         lids = {l["id"] for l in eligible} - blocked
-        rows = [dict(r) for r in c.execute("""SELECT a.*,l.name,l.version,l.jurisdiction,l.kind,l.source_url,l.source_kind,l.source_name,
-            l.valid_from,l.valid_to,l.reviewed_at,l.sha256,l.canonical_name,l.document_number,COALESCE(h.heading_path,'') AS heading_path FROM articles a JOIN laws l ON l.id=a.law_id LEFT JOIN article_headings h ON h.article_id=a.id""") if r["law_id"] in lids]
+        rows = []
+        ids = sorted(lids)
+        for start in range(0, len(ids), 800):
+            batch = ids[start:start+800]
+            rows.extend(dict(r) for r in c.execute("""SELECT a.*,l.name,l.version,l.jurisdiction,l.kind,l.source_url,l.source_kind,l.source_name,
+            l.valid_from,l.valid_to,l.reviewed_at,l.sha256,l.canonical_name,l.document_number,COALESCE(h.heading_path,'') AS heading_path FROM articles a JOIN laws l ON l.id=a.law_id LEFT JOIN article_headings h ON h.article_id=a.id"""
+                + " WHERE a.law_id IN ("+",".join("?" for _ in batch)+") ORDER BY l.id,a.ordinal", batch))
     rows = [r | {"display_name":r["name"], "name":r.get("canonical_name") or r["name"], "authority_status":"human_reviewed"} for r in rows]
-    return rows, warnings
+    return tuple(rows), tuple(warnings)
 
 
 def cosine(a, b):
@@ -118,7 +189,7 @@ def cosine(a, b):
 
 def search(queries, event_date, jurisdiction, limit=None):
     rows, warnings = corpus(event_date, jurisdiction)
-    selected, extra = rank(queries, rows, limit, dense=True)
+    selected, extra = rank(queries, rows, limit, dense=True, catalogue=_catalogue(*db.corpus_version()))
     return selected, warnings+extra
 
 
@@ -132,7 +203,14 @@ def observe(callback):
     finally:_observer.reset(token)
 
 
-def rank(queries, rows, limit=None, dense=False):
+@lru_cache(maxsize=2)
+def lexical_index(documents):
+    docs = [Counter(tokens(text)) for text in documents]
+    lengths = [sum(doc.values()) for doc in docs]
+    return docs, lengths, sum(lengths)/max(1, len(lengths)), Counter(token for doc in docs for token in doc)
+
+
+def rank(queries, rows, limit=None, dense=False, catalogue=()):
     """Three recall lanes, optional reranking, then bounded same-law expansion."""
     from .. import indexing, retrieval_services as services
     started=time.monotonic();s=services.settings();limit=limit or s['final_k'];warnings=[]
@@ -152,26 +230,33 @@ def rank(queries, rows, limit=None, dense=False):
         callback=_observer.get()
         if callback:callback(detail)
         return selected,warnings
+    prepared = {}
+    names = {n for row in (*rows, *catalogue) for n in law_names(row)}
+    available_names = {law_key(n) for row in rows for n in law_names(row)}
+    catalogued_names = {law_key(n) for row in catalogue for n in law_names(row)}
+    for query in queries:
+        bindings,mentions=article_bindings(query,(),names)
+        targets=list(dict.fromkeys(m["name"] for m in mentions))
+        prepared[query]=(bindings,mentions,targets)
+        for name in targets:
+            if law_key(name) in available_names:
+                continue
+            exists=law_key(name) in catalogued_names
+            warnings.append(('查询点名的法规已入库但被日期、地区、复核或版本冲突筛选排除：' if exists else '查询点名了未入库法规：')+'《'+name+'》；已禁止无主体条号匹配，请补录或核对法规状态。')
     if not rows or not queries:return finish([])
-    docs=[Counter(tokens(indexing.header(r)+' '+r['body'])) for r in rows]
-    lengths=[sum(d.values()) for d in docs];avg=sum(lengths)/len(lengths)
-    df=Counter(t for d in docs for t in d);fused=defaultdict(float);exact_ids=set();lex_ids=set();dense_ids=set()
+    docs,lengths,avg,df=lexical_index(tuple(indexing.header(r)+' '+r['body'] for r in rows))
+    fused=defaultdict(float);exact_ids=set();lex_ids=set();dense_ids=set()
     unique_laws={r['law_id'] for r in rows}
     for query in queries:
-        qnumbers={article_key(x) for x in re.findall(r'第'+NUM+r'条(?:之'+NUM+r')?',normalize(query))}
-        targets=query_laws(query,rows)
-        # A query that names another law (even one absent from the library) must
-        # never feed subject-less article numbers into the exact lane.
-        foreign=[n for n in re.findall(r'《([^》]{2,220})》',query) if not any(matches_law(r,n) for r in rows)]
-        for name in re.findall(r'([一-鿿]{1,24}(?:法|条例|规定|办法|解释|规则|细则|决定|决议|公约|条约|通则|法典|典|规范|准则|协定))第'+NUM+r'条',normalize(query)):
-            if name in ('本法','该法','此法','有关规定','法律规定','相关法律','有关法律','本规定','该规定','本办法','该办法','本条例','该条例','本解释','该解释','本规则','该规则','本细则','该细则'):continue
-            if name not in foreign and not any(matches_law(r,name) for r in rows):foreign.append(name)
-        if foreign:
-            warnings.append('查询点名了未入库法规：'+'、'.join('《'+n+'》' for n in foreign)+'；已禁止无主体条号匹配，请补录或核对法规名称。')
-        subject_bound=bool(targets) or (len(unique_laws)==1 and not foreign)
+        bindings,mentions,targets=prepared[query]
+        def allowed(row):
+            if targets and not any(matches_law(row,name) for name in targets):
+                return False
+            same_number=[name for number,name in bindings if number==article_key(row['number'])]
+            return not same_number or any(name is None or matches_law(row,name) for name in same_number)
         qt=set(tokens(query));scores=[]
         for i,doc in enumerate(docs):
-            if targets and not any(matches_law(rows[i],name) for name in targets):continue
+            if not allowed(rows[i]):continue
             score=0.;matched=0
             for t in qt:
                 f=doc[t]
@@ -179,7 +264,7 @@ def rank(queries, rows, limit=None, dense=False):
                 matched+=1
                 idf=math.log(1+(len(rows)-df[t]+.5)/(df[t]+.5))
                 score+=idf*f*2.5/(f+1.5*(.25+.75*lengths[i]/max(avg,1)))
-            exact=article_key(rows[i]['number']) in qnumbers and subject_bound
+            exact=any(article_key(rows[i]['number'])==number and (matches_law(rows[i],name) if name else not mentions and len(unique_laws)==1) for number,name in bindings)
             if exact:exact_ids.add(i)
             if (matched>0 and score>0) or exact:scores.append((i,score+(100 if exact else 0)))
         for position,(i,_) in enumerate(sorted(scores,key=lambda x:-x[1])[:s['recall_k']]):
@@ -200,10 +285,12 @@ def rank(queries, rows, limit=None, dense=False):
                     ids={r['id']:i for i,r in enumerate(rows)}
                     checked=[(aid,services.validate_vectors([v],1,len(qvectors[0]))[0],text) for aid,v,text in stored]
                     for query,qv in zip(qs,qvectors):
-                        targets=query_laws(query,rows);best={}
+                        bindings,mentions,targets=prepared[query];best={}
                         for aid,v,text in checked:
                             i=ids[aid]
                             if targets and not any(matches_law(rows[i],n) for n in targets):continue
+                            same_number=[name for number,name in bindings if number==article_key(rows[i]['number'])]
+                            if same_number and not any(name is None or matches_law(rows[i],name) for name in same_number):continue
                             score=sum(a*b for a,b in zip(qv,v))
                             best[i]=max(best.get(i,-2),score)
                         for position,(i,score) in enumerate(sorted(best.items(),key=lambda x:-x[1])[:s['recall_k']]):

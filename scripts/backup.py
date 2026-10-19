@@ -29,5 +29,5 @@ with tempfile.TemporaryDirectory() as tmp:
         z.write(target, "lexcite.sqlite3")
         if (data / "secret.key").exists():
             z.write(data / "secret.key", "secret.key")
-        z.writestr("backup.json", json.dumps({"version": "1.3.0", "created": dt.datetime.now(dt.timezone.utc).isoformat()}))
+        z.writestr("backup.json", json.dumps({"version": "1.4.0", "created": dt.datetime.now(dt.timezone.utc).isoformat()}))
 print(str(out.resolve()))

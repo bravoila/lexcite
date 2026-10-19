@@ -88,9 +88,10 @@ async function wait(predicate,label){for(let i=0;i<120;i++){if(predicate())retur
  assert.match(errorBox().textContent,/未识别/);assert.equal($('#import-dialog').open,true);
  input('#law-text',example.text);click('#preview-law');await wait(()=>!$('#import-submit').disabled,'retry preview clears error');
  assert.equal($('#import-dialog .dialog-message').hidden,true);
- submit('#import-form');await wait(()=>errorBox()&&!errorBox().hidden,'duplicate import inside dialog');
- assert.match(errorBox().textContent,/已存在/);assert.equal($('#law-text').value,example.text);
- click('#import-dialog .close');click('#import-law');assert.equal($('#import-dialog .dialog-message').hidden,true);
+ submit('#import-form');await wait(()=>$('#review-dialog').open,'duplicate opens existing law');
+ assert.match($('#review-dialog .dialog-message').textContent,/已存在/);assert.equal($('#law-text').value,example.text);
+ assert.equal((await (await w.fetch('/api/laws')).json()).length,1);
+ click('#review-dialog .close');click('#import-law');assert.equal($('#import-dialog .dialog-message').hidden,true);
 
  // Upload a real multipart file; no source URL is supplied.
  meta('文件导入测试法规','测试版');

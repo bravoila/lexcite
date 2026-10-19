@@ -2,6 +2,7 @@ from .law_names import display_title
 from contextlib import asynccontextmanager
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -24,7 +26,7 @@ from .research_agent.schemas import Plan
 
 logger = logging.getLogger("lexcite")
 MODEL_LOCK = jobs.MODEL_LOCK
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.0"
 
 
 @asynccontextmanager
@@ -33,10 +35,13 @@ async def lifespan(app):
     jobs.init()
     auth.init()
     llm.cipher()
-    if not _cookie_secure() and not os.getenv("LEXCITE_SECURE_COOKIE"):
+    if not _cookie_secure():
         logger.warning("会话 Cookie 未启用 Secure；公网部署请设置 LEXCITE_PUBLIC_URL=https://… 或 LEXCITE_SECURE_COOKIE=1，并仅通过 HTTPS 访问")
-    retrieval_services.init()
-    indexing.init()
+    try:
+        retrieval_services.init()
+        indexing.init()
+    except ValueError as exc:
+        logger.error("自动索引未启动：%s", exc)
     yield
     indexing.stop()
 
@@ -44,40 +49,7 @@ async def lifespan(app):
 app = FastAPI(title="法据 API", version=APP_VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
-@app.middleware("http")
-async def protection(request: Request, call_next):
-    if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
-        if request.headers.get("X-Lexcite") != "1":
-            return JSONResponse({"detail": "缺少请求校验标记"}, status_code=403)
-        public_url = os.getenv("LEXCITE_PUBLIC_URL", "").rstrip("/")
-        # With LEXCITE_PUBLIC_URL set it is the fixed whitelist source and the
-        # Host header cannot widen it; without it, single-host local deployments
-        # fall back to the request origin. SameSite=Strict remains the main line.
-        allowed = {public_url} if public_url else {str(request.base_url).rstrip("/")}
-        origin = request.headers.get("origin")
-        if origin and origin.rstrip("/") not in allowed:
-            return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
-        # Reject unauthenticated writes before reading the body, so an anonymous
-        # client cannot make the single worker buffer a large payload.
-        if request.url.path not in ("/api/login", "/api/setup") and not auth.authenticated(request):
-            return JSONResponse({"detail": "请先登录"}, status_code=401)
-        try:
-            content_length = int(request.headers.get("content-length", "0"))
-        except ValueError:
-            return JSONResponse({"detail": "无效请求长度"}, status_code=400)
-        # File extraction keeps the 20MB upload budget; everything else is capped
-        # at 8MB (the largest pasted law text is ~6MB).
-        cap = 22_000_000 if request.url.path == "/api/extract" else 8_000_000
-        if content_length > cap:
-            return JSONResponse({"detail": "文件过大，最大20MB" if cap > 10_000_000 else "请求内容过大，最大8MB"}, status_code=413)
-        # Enforce the same bound for chunked uploads before JSON/multipart parsing.
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > cap:
-                return JSONResponse({"detail": "请求内容超过限制"}, status_code=413)
-        request._body = bytes(body)
-    response = await call_next(request)
+def protected_response(request, response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -85,6 +57,52 @@ async def protection(request: Request, call_next):
     if request.url.path == "/" or request.url.path.startswith(("/api/", "/static/", "/assets/")):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.middleware("http")
+async def protection(request: Request, call_next):
+    def reject(message, status):
+        return protected_response(request, JSONResponse({"detail": message}, status_code=status))
+
+    if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.headers.get("X-Lexcite") != "1":
+            return reject("缺少请求校验标记", 403)
+        public_url = os.getenv("LEXCITE_PUBLIC_URL", "").rstrip("/")
+        # With LEXCITE_PUBLIC_URL set it is the fixed whitelist source and the
+        # Host header cannot widen it; without it, single-host local deployments
+        # fall back to the request origin. SameSite=Strict remains the main line.
+        allowed = {public_url} if public_url else {str(request.base_url).rstrip("/")}
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") not in allowed:
+            return reject("请求来源不匹配", 403)
+        # Reject unauthenticated writes before reading the body, so an anonymous
+        # client cannot make the single worker buffer a large payload.
+        if request.url.path not in ("/api/login", "/api/setup") and not auth.authenticated(request):
+            return reject("请先登录", 401)
+        try:
+            content_length = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            return reject("无效请求长度", 400)
+        if content_length < 0:
+            return reject("无效请求长度", 400)
+        cap = 16_384 if request.url.path in ("/api/login", "/api/setup") else 20_000_000 if request.url.path == "/api/extract" else 8_000_000
+        if content_length > cap:
+            return reject("登录或初始化请求最大16KB" if cap == 16_384 else "文件请求最大20MB" if cap == 20_000_000 else "请求内容过大，最大8MB", 413)
+        # Enforce the same bound for chunked uploads before JSON/multipart parsing.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > cap:
+                return reject("请求内容超过限制", 413)
+        request._body = bytes(body)
+    response = await call_next(request)
+    return protected_response(request, response)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request, exc):
+    errors = [{key: error[key] for key in ("loc", "msg", "type")} for error in exc.errors()]
+    return protected_response(request, JSONResponse({"detail": errors}, status_code=422))
 
 
 @app.exception_handler(ValueError)
@@ -105,7 +123,7 @@ async def integrity_error(request, exc):
 @app.exception_handler(Exception)
 async def unexpected_error(request, exc):
     logger.error("Request failed: %s", type(exc).__name__)
-    return JSONResponse({"detail": "服务处理失败，操作未完成。请联系部署管理员查看日志。"}, status_code=500)
+    return protected_response(request, JSONResponse({"detail": "服务处理失败，操作未完成。请联系部署管理员查看日志。"}, status_code=500))
 
 
 @app.get("/healthz")
@@ -145,14 +163,18 @@ def client_address(request):
         forwarded = request.headers.get("x-forwarded-for", "")
         if forwarded:
             last = forwarded.split(",")[-1].strip()
-            if re.fullmatch(r"[0-9a-fA-F:.\[\]]+", last):
-                return last
+            try:
+                return str(ipaddress.ip_address(last))
+            except ValueError:
+                pass
     return request.client.host if request.client else "unknown"
 
 
 @app.post("/api/login")
 def login(value: LoginInput, request: Request):
-    token = auth.login(value.password, client_address(request))
+    direct = request.client.host if request.client else ""
+    recovery = direct in auth.LOCAL_ADDRESSES and not request.headers.get("x-forwarded-for") and os.getenv("LEXCITE_TRUST_PROXY") != "1"
+    token = auth.login(value.password, client_address(request), local_recovery=recovery)
     response = JSONResponse({"ok": True})
     response.set_cookie("lexcite_session", token, httponly=True, samesite="strict", secure=_cookie_secure(), max_age=28800)
     return response
@@ -193,17 +215,14 @@ def create_case(value: CaseInput):
 
 @app.patch("/api/cases/{cid}", dependencies=[Depends(auth.require)])
 def update_case(cid: str, value: CaseInput):
-    jobs.ensure_idle(cid)
-    db.case_context(cid)
-    with db.connect() as c:
+    with jobs.case_mutation(cid), db.connect() as c:
         c.execute("UPDATE cases SET title=?,event_date=?,jurisdiction=? WHERE id=?", (value.title, value.event_date.isoformat(), value.jurisdiction, cid))
     return {"ok": True}
 
 
 @app.delete("/api/cases/{cid}", dependencies=[Depends(auth.require)])
 def delete_case(cid: str):
-    jobs.ensure_idle(cid)
-    with db.connect() as c:
+    with jobs.case_mutation(cid), db.connect() as c:
         c.execute("DELETE FROM cases WHERE id=?", (cid,))
     db.audit("case_delete", {"id": cid})
     return {"ok": True}
@@ -221,9 +240,7 @@ def case_detail(cid: str):
 
 @app.post("/api/cases/{cid}/memories", dependencies=[Depends(auth.require)])
 def memory(cid: str, value: MemoryInput):
-    jobs.ensure_idle(cid)
-    db.case_context(cid)
-    with db.connect() as c:
+    with jobs.case_mutation(cid), db.connect() as c:
         count = c.execute("SELECT COUNT(*) FROM memories WHERE case_id=?", (cid,)).fetchone()[0]
         if count >= 30:
             raise HTTPException(400, "每案最多30条已确认事实，请先整理已有记录")
@@ -234,29 +251,20 @@ def memory(cid: str, value: MemoryInput):
 
 @app.delete("/api/cases/{cid}/memories/{mid}", dependencies=[Depends(auth.require)])
 def delete_memory(cid: str, mid: str):
-    jobs.ensure_idle(cid)
-    with db.connect() as c:
+    with jobs.case_mutation(cid), db.connect() as c:
         c.execute("DELETE FROM memories WHERE id=? AND case_id=?", (mid,cid))
     return {"ok": True}
 
 
 @app.post("/api/cases/{cid}/ask", dependencies=[Depends(auth.require)])
 def ask(cid: str, value: AskInput):
-    db.case_context(cid)
-    if not MODEL_LOCK.acquire(blocking=False):
-        raise HTTPException(409, "当前有分析或索引任务进行中，请稍后重试")
     try:
-        # The current question is provided separately and appended only after completion.
-        result = research_agent.answer(cid, value.text, value.mode, web_query=value.web_query, online_research=value.online_research)
-        user_id, mid = db.uid(), db.uid()
-        with db.connect() as c:
-            for message_id, role, body in [(user_id, "user", {"text": value.text}), (mid, "assistant", result)]:
-                c.execute("INSERT INTO messages VALUES(?,?,?,?,?)", (message_id, cid, role, json.dumps(body, ensure_ascii=False), db.now()))
-            case_state.persist(c, cid, result, user_id)
-        db.audit("answer", {"case_id": cid, "message_id": mid, "status": result["status"], "citations": [r["id"] for r in result["citations"]]})
-        return result | {"message_id": mid}
-    finally:
-        MODEL_LOCK.release()
+        job = jobs.start(cid, value, background=False)
+    except InterruptedError as exc:
+        raise HTTPException(409, "研究已停止，未保存未完成结论") from exc
+    if job["status"] != "completed" or not job.get("result"):
+        raise HTTPException(409, job.get("error") or "该请求仍在研究中，请通过任务状态接口查看")
+    return job["result"] | {"message_id": job["message_id"], "job_id": job["id"]}
 
 
 @app.post("/api/cases/{cid}/research", status_code=202, dependencies=[Depends(auth.require)])
@@ -286,16 +294,16 @@ def search_settings():
 
 @app.post("/api/search/settings", dependencies=[Depends(auth.require)])
 def save_search_settings(value: SearchSettingsInput):
-    if MODEL_LOCK.locked():
-        raise HTTPException(409, "请等待当前研究完成后修改搜索设置")
-    websearch.save_settings(value.model_dump())
-    return websearch.public_settings()
+    with jobs.model_slot():
+        websearch.save_settings(value.model_dump())
+        return websearch.public_settings()
 
 
 @app.post("/api/search/test", dependencies=[Depends(auth.require)])
 def test_search():
     try:
-        rows = websearch.search("中华人民共和国民法典")
+        with jobs.model_slot():
+            rows = websearch.search("中华人民共和国民法典")
         return {"ok": True, "message": f"搜索接口正常，本次找到 {len(rows)} 个官网线索。"}
     except websearch.SearchError as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -386,7 +394,10 @@ def hash_check(lid: str):
         if not snapshot:
             return {"ok": False, "snapshot_missing": True, "sha256": row["sha256"],
                     "note": "该版本导入于原文存档功能上线前，无原始快照可重算；可删除后重新导入以生成存档。"}
-        recomputed = hashlib.sha256(zlib.decompress(snapshot["content"])).hexdigest()
+        try:
+            recomputed = hashlib.sha256(zlib.decompress(snapshot["content"])).hexdigest()
+        except zlib.error as exc:
+            raise HTTPException(409, "原文存档损坏，无法重算 SHA256；请从备份恢复或对照原文重新导入，未修改已有法条") from exc
         return {"ok": recomputed == row["sha256"], "snapshot_missing": False,
                 "sha256": row["sha256"], "recomputed": recomputed,
                 "note": "口径：导入时提交的原始正文（未做规范化或拆分）按 UTF-8 编码取 SHA-256。"}
@@ -486,17 +497,16 @@ def get_settings():
 
 @app.post("/api/settings", dependencies=[Depends(auth.require)])
 def save_settings(value: SettingsInput):
-    if MODEL_LOCK.locked():
-        raise HTTPException(409, "请等待当前任务结束后再修改模型配置")
-    llm.save_settings(value.model_dump())
-    db.audit("model_settings", {"provider": value.provider, "model": value.model})
-    return llm.public_settings()
+    with jobs.model_slot():
+        llm.save_settings(value.model_dump())
+        db.audit("model_settings", {"provider": value.provider, "model": value.model})
+        return llm.public_settings()
 
 
 @app.post("/api/settings/test", dependencies=[Depends(auth.require)])
 def model_test():
     seen = []
-    with llm.capture_reasoning(lambda fragment: seen.append(True) if not seen else None):
+    with jobs.model_slot(), llm.capture_reasoning(lambda fragment: seen.append(True) if not seen else None):
         result = llm.request_json("你是连接测试助手。返回JSON：queries数组仅包含连接成功四个字。", {"test": True}, Plan)
     message = "模型连接和结构化输出正常" if result.queries else "接口可用，但输出内容为空"
     message += "；本次接口返回了思考字段" if seen else "；本次未返回思考字段（不影响使用）"
