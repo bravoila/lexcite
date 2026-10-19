@@ -77,3 +77,13 @@ PLAN += """
 authorities列出真正必要的正式法规名称和条号。检索优先查找专项依据；未取得时仍应分析现有资料直接支持的部分，补充建议单列，不得以缺文件阻断全部分析或用另一本法律的相同条号替代。
 source_gaps与previous_observation是已有动作结果：反复检索没有新增法源时须针对缺口改变查询；缺法源不得以clarify要求用户补案件事实。
 """
+
+EVIDENCE_CONTEXT = """
+evidence保留完整候选条文，包括未被结论引用的条文；仍须检查其中可能限制或推翻结论的规定。
+evidence_context按law_id提供该法规共用的temporal_provisions、版本说明及修正案日期依据，适用于该law_id下所有条文，不得忽略。
+previous_attempt和verified_claims中的历史结论仅保留文字及引用ID，不是引用原文或法源；本次结论的引文仍须从evidence中的完整原文取得。
+"""
+
+DRAFT += EVIDENCE_CONTEXT
+VERIFY += EVIDENCE_CONTEXT
+REPAIR += EVIDENCE_CONTEXT

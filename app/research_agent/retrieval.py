@@ -6,6 +6,7 @@ import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from functools import lru_cache
 import jieba
 from .. import db, llm
@@ -187,13 +188,8 @@ def cosine(a, b):
     return dot / norm if norm else 0
 
 
-def search(queries, event_date, jurisdiction, limit=None):
-    rows, warnings = corpus(event_date, jurisdiction)
-    selected, extra = rank(queries, rows, limit, dense=True, catalogue=_catalogue(*db.corpus_version()))
-    return selected, warnings+extra
-
-
 _observer = ContextVar('retrieval_observer', default=None)
+_search_cache = ContextVar('retrieval_search_cache', default=None)
 
 
 @contextmanager
@@ -201,6 +197,45 @@ def observe(callback):
     token=_observer.set(callback)
     try:yield
     finally:_observer.reset(token)
+
+
+@contextmanager
+def reuse_searches():
+    token=_search_cache.set({})
+    try:yield
+    finally:_search_cache.reset(token)
+
+
+def search(queries, event_date, jurisdiction, limit=None):
+    from .. import retrieval_services as services
+    started=time.monotonic();cache=_search_cache.get();queries=tuple(queries)
+    if cache is None:
+        rows,warnings=corpus(event_date,jurisdiction)
+        selected,extra=rank(queries,rows,limit,dense=True,catalogue=_catalogue(*db.corpus_version()))
+        return selected,warnings+extra
+    cutoff=(dt.date.today()-dt.timedelta(days=llm.settings()['review_days'])).isoformat()
+    key=(db.corpus_version(),queries,event_date,jurisdiction,cutoff,limit,
+         json.dumps(services.settings(),sort_keys=True))
+    callback=_observer.get()
+    if key in cache:
+        selected,warnings,detail=deepcopy(cache[key])
+        detail.update(cache_hit=True,embedding_requests=0,rerank_requests=0,reranked_candidates=0,
+                      elapsed_seconds=round(time.monotonic()-started,3),
+                      summary='复用本次研究的本地检索结果；'+detail['summary'])
+        if callback:callback(detail)
+        return selected,warnings
+    details=[]
+    def capture(detail):
+        details.append(deepcopy(detail))
+        if callback:callback(detail)
+    with observe(capture):
+        rows,warnings=corpus(event_date,jurisdiction)
+        selected,extra=rank(queries,rows,limit,dense=True,catalogue=_catalogue(*db.corpus_version()))
+    warnings=warnings+extra
+    if details and not any(details[-1][field] in ('failed','index_missing','partial')
+                           for field in ('embedding_status','reranker_status')):
+        cache[key]=deepcopy((selected,warnings,details[-1]))
+    return selected,warnings
 
 
 @lru_cache(maxsize=2)
@@ -219,7 +254,7 @@ def rank(queries, rows, limit=None, dense=False, catalogue=()):
       'embedding_model':s['embedding']['model'],'reranker_model':s['reranker']['model'],
       'embedding_status':'disabled','reranker_status':'disabled','corpus_articles':len(rows),
       'indexed_articles':0,'lexical_candidates':0,'dense_candidates':0,'exact_candidates':0,
-      'candidate_count':0,'reranked_candidates':0,'embedding_requests':0,'rerank_requests':0}
+      'candidate_count':0,'reranked_candidates':0,'embedding_requests':0,'rerank_requests':0,'cache_hit':False}
     def finish(selected):
         methods=['BM25']
         if detail['exact_candidates']:methods.append('法规／条号匹配')

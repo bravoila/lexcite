@@ -44,6 +44,26 @@ def evidence_key(rows):
         key=lambda row:row['id']),ensure_ascii=False,sort_keys=True)
 
 
+def model_evidence(rows):
+    fields=('id','law_id','name','number','body','heading_path','version','document_number',
+            'jurisdiction','kind','valid_from','valid_to','authority_status')
+    documents={}
+    for row in rows:
+        document=documents.setdefault(row['law_id'],{'law_id':row['law_id'],'temporal_provisions':[]})
+        for text in row.get('temporal_provisions',[]):
+            if text not in document['temporal_provisions']:document['temporal_provisions'].append(text)
+        if row.get('version_note'):document['version_note']=row['version_note']
+        if row.get('version_basis'):
+            document['version_basis']={k:v for k,v in row['version_basis'].items() if k in ('name','effective_from','quote')}
+    return {'evidence':[{k:row[k] for k in fields if k in row} for row in rows],
+            'evidence_context':[document for document in documents.values() if len(document)>2 or document['temporal_provisions']]}
+
+
+def claim_summary(claim):
+    return {'text':claim.text,'kind':claim.kind,'section':claim.section,
+            'evidence':[{'article_id':ref.article_id} for ref in claim.evidence]}
+
+
 def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_query='', online_research=None):
     started=time.monotonic();s=llm.settings();deadline=started+s['agent_timeout']
     case, memories, _=db.case_context(case_id)
@@ -130,6 +150,11 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
     def sync_context():
         context.update({'research_focus':state['research_focus'],'user_stated_facts':state['facts']})
         result.update({'research_focus':state['research_focus'],'case_facts':state['facts']})
+
+    def model_context():
+        repeated={context['question'],context['research_focus'],*context['confirmed_facts']}
+        history=list(dict.fromkeys(text for text in state['history'] if text not in repeated))
+        return context|{'previous_user_messages_unconfirmed':history}
 
     def questions(items):
         fact_questions,legal=split_questions(items)
@@ -284,7 +309,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             if action=='retrieve':
                 emit('repair','制定补充检索方案','复核指出需要新法源，仅为缺证结论制定检索方案；没有新证据不重写整份分析。')
                 try:
-                    plan=call(PLAN,context|{'repair_feedback':feedback,'source_gaps':result['source_gaps'],'authority_directory':needs,'previous_observation':{'candidate_ids':[r['id'] for r in evidence],'coverage':result['coverage']}},Plan)
+                    plan=call(PLAN,model_context()|{'repair_feedback':feedback,'source_gaps':result['source_gaps'],'authority_directory':needs,'previous_observation':{'candidate_ids':[r['id'] for r in evidence],'coverage':result['coverage']}},Plan)
                     needs=unique_needs(needs+plan.authorities)
                     queries=list(dict.fromkeys([focus,fact_query]+[q[:400] for q in plan.queries if q.strip()]+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]))[:9]
                     result['missing_facts']=questions(result['missing_facts']+plan.questions)
@@ -332,10 +357,10 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             if action=='repair':
                 if plan is not None and not attempt('repair'):break
                 targets={f['claim_index'] for f in feedback if f['type']=='invalid_citation' or f['type']=='unsupported_claim' and f['action']=='rewrite'}
-                failures=[f|{'claim':working[f['claim_index']].model_dump()} for f in feedback if f.get('claim_index') in targets]
+                failures=[{k:v for k,v in f.items() if k!='text'}|{'claim':working[f['claim_index']].model_dump()} for f in feedback if f.get('claim_index') in targets]
                 emit('repair','局部修正未通过的结论',f'仅处理 {len(targets)} 项失败结论；保留 {len(approved)} 项已核验结论，不重新规划或检索。')
                 try:
-                    repaired=call(REPAIR,context|{'evidence':evidence,'source_gaps':result['source_gaps'],'failed_claims':failures},Repair)
+                    repaired=call(REPAIR,model_context()|model_evidence(evidence)|{'source_gaps':result['source_gaps'],'failed_claims':failures},Repair)
                     if sorted(p.claim_index for p in repaired.patches)!=sorted(targets):
                         raise llm.ModelError('局部修正必须且只能覆盖全部待修正结论，不能重复或新增下标')
                     citation_only={f['claim_index'] for f in feedback if f['type']=='invalid_citation'}
@@ -361,14 +386,15 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             else:
                 for source_pass in range(2):
                     draft=None
-                    payload=context|{'evidence':evidence,'source_gaps':result['source_gaps'],'analysis_scope':result['analysis_scope'],'repair_feedback':feedback,'previous_attempt':previous}
+                    payload=model_context()|model_evidence(evidence)|{'source_gaps':result['source_gaps'],'analysis_scope':result['analysis_scope'],'repair_feedback':feedback,'previous_attempt':previous}
                     emit('draft','分析规则与个案条件','一次检查相关性与覆盖，先回答现有原文支持的部分，同时列出推荐资料。')
                     try:draft=call(DRAFT,payload,Draft)
                     except llm.ModelError as exc:
                         warnings.append(str(exc));feedback=[{'type':'model_error','reason':str(exc)}]
                         if exc.fatal:return finish()
                         break
-                    previous=draft.model_dump();result['missing_facts']=questions(draft.missing_facts)
+                    previous=draft.model_dump()|{'claims':[claim_summary(claim) for claim in draft.claims]}
+                    result['missing_facts']=questions(draft.missing_facts)
                     needs=unique_needs(needs+draft.missing_authorities);update_gaps(needs,draft.missing_authorities)
                     if source_pass!=0 or not acquire():break
                     queries=list(dict.fromkeys(queries+['《'+n['name']+'》'+' '.join(n.get('articles',[])) for n in needs]))[:9]
@@ -379,7 +405,7 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
                     action='retry_draft'
                     continue
                 working=dict(enumerate(draft.claims));approved=set();checking=set(working)
-            previous=draft.model_dump()|{'claims':[working[i].model_dump() for i in sorted(working)]}
+            previous=draft.model_dump()|{'claims':[claim_summary(working[i]) for i in sorted(working)]}
             if not working:
                 emit('draft','尚未形成带依据的结论',('局部修正已删除全部无法支持的结论。' if action=='repair' else '模型返回空草稿。')+'本轮没有结论进入引用校验，不计为校验通过。','warning')
                 result['coverage']=CoverageAudit(selected_ids=[],coverage='missing',missing_authorities=draft.missing_authorities,reason=draft.limitation or '现有资料未形成相关的受支持结论。').model_dump()
@@ -405,8 +431,10 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             if review_indices:
                 emit('review','复核证据支持性','检查引用是否支持结论，核对例外、过渡适用、否定、未知和是否遗漏关键条件；同一证据下已通过的结论不重复复核。')
                 try:
-                    verdict=call(VERIFY,context|{'evidence':evidence,'source_gaps':result['source_gaps'],'coverage':result['coverage'],'draft':[working[i].model_dump() for i in review_indices],
-                        'verified_claims':[working[i].model_dump() for i in sorted(approved)]},Verdict,verify=True)
+                    verdict=call(VERIFY,model_context()|model_evidence(evidence)|{'source_gaps':result['source_gaps'],
+                        'coverage':{k:v for k,v in result['coverage'].items() if k in ('coverage','reason')},
+                        'draft':[working[i].model_dump() for i in review_indices],
+                        'verified_claims':[claim_summary(working[i]) for i in sorted(approved)]},Verdict,verify=True)
                     if sorted(v.claim_index for v in verdict.checks)!=list(range(len(review_indices))):raise llm.ModelError('复核结果不完整')
                 except llm.ModelError as exc:
                     warnings.append(str(exc));emit('review','证据复核未完成',str(exc),'warning')
@@ -427,6 +455,6 @@ def answer(case_id, question, mode='strict', progress=None, cancelled=None, web_
             action='retrieve' if any(f['type']=='unsupported_claim' and f['action']=='retrieve' for f in feedback) else 'repair'
         return finish()
     try:
-        with llm.controlled(check,deadline), retrieval.observe(on_retrieval):return run()
+        with llm.controlled(check,deadline), retrieval.reuse_searches(), retrieval.observe(on_retrieval):return run()
     except BudgetExceeded as exc:
         warnings.append(str(exc)+'，保留已经通过校验的部分。');return finish()

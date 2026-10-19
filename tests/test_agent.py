@@ -175,7 +175,9 @@ def test_local_repair_preserves_verified_claims_and_original_indices(client,corp
             if len(reviews)==1:
                 assert [c['text'] for c in payload['draft']]==[original[1].text,original[2].text]
                 return Verdict(checks=[{'claim_index':0,'supported':True,'reason':'fixture'},{'claim_index':1,'supported':False,'reason':'需要缩小结论'}])
-            assert payload['verified_claims']==[original[1].model_dump()]
+            assert payload['verified_claims']==[{
+                'text':original[1].text,'kind':original[1].kind,'section':original[1].section,
+                'evidence':[{'article_id':ref.article_id} for ref in original[1].evidence]}]
             assert original[1].text not in [c['text'] for c in payload['draft']]
             return Verdict(checks=[{'claim_index':i,'supported':repair_supported,'reason':'fixture'} for i in range(2)])
         raise AssertionError(schema)
