@@ -11,6 +11,29 @@ if(document.documentElement.dataset.appVersion!==CLIENT_VERSION){
  return;
 }
 const state = {jobId:null,recoveryJobId:null,caseRequest:0,caseLoading:false, searchSettings:null,caseId:null, case:null, cases:[], view:"research", citations:new Map(), editing:false, lawId:null, previewText:null, busy:false, settings:null, laws:[], importBusy:false, importSaving:false, importAbort:null, importSource:null, sourceEdited:false, loadedURL:null};
+const pendingResearchKey="lexcite.pendingResearch.v1";
+let pendingResearchFallback=null;
+function pendingResearch(){
+ try{const value=JSON.parse(sessionStorage.getItem(pendingResearchKey));if(value?.case_id&&value?.request_id&&value?.payload){pendingResearchFallback=value;return value;}return pendingResearchFallback;}
+ catch{return pendingResearchFallback;}
+}
+function savePendingResearch(value){
+ pendingResearchFallback=value;
+ try{sessionStorage.setItem(pendingResearchKey,JSON.stringify(value));}catch{}
+}
+function clearPendingResearch(jobId){
+ const pending=pendingResearch();
+ if(pending?.job_id===jobId){pendingResearchFallback=null;try{sessionStorage.removeItem(pendingResearchKey);}catch{}}
+}
+function restoreResearchPayload(payload){
+ $("#question").value=payload.text||"";$("#web-query").value=payload.web_query||"";
+ $("#answer-mode").value=payload.mode||"strict";
+ $("#online-research").value=payload.online_research===null||payload.online_research===undefined?"default":payload.online_research?"on":"off";
+ fitQuestion();
+}
+function sameResearchPayload(a,b){
+ return ["text","mode","web_query","online_research"].every(key=>(a[key]??null)===(b[key]??null));
+}
 const esc = x => String(x ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 // Only http(s) URLs are linkable; anything else (javascript:, data:, protocol-relative
 // into a different origin…) must degrade to plain text so injected sources cannot
@@ -53,7 +76,7 @@ function view(name){state.view=name;["research","laws","settings"].forEach(v=>$(
 async function status(){const d=await api("/status");defaultOnlineResearch=!!d.model.online_research;updateSourceNote();$("#law-count").textContent=d.laws;$("#stat-laws").textContent=d.laws;$("#stat-articles").textContent=d.articles;$("#stat-reviewed").textContent=d.reviewed;$("#model-state").textContent=d.model.configuration_error?"模型配置需修正":d.model.provider==="none"?"法条检索模式":d.model.model;$("#privacy-state").textContent=d.retrieval&&[d.retrieval.embedding,d.retrieval.reranker].some(s=>s.provider!=="none")?"分析与检索服务分别配置":d.model.provider==="none"?"无需模型 · 原文检索":d.model.provider==="ollama"?"本地模型":"已连接模型服务";const errors=[d.model.configuration_error,d.retrieval?.configuration_error].filter(Boolean);if(errors.length)toast(errors.join('；')+'。请到“模型与设置”修正。',true);}
 function renderRetrieval(p){if(!p.retrieval_runs?.length)return '';const names={applied:'已使用',partial:'部分覆盖',failed:'失败并降级',not_configured:'未配置',index_missing:'没有可用索引',disabled:'未启用',temporary_unindexed:'临时条文未建向量索引'};return `<details class="retrieval-proof"><summary>本次实际检索 · ${esc([...new Set(p.retrieval_runs.flatMap(r=>r.methods))].join(' + '))}</summary>${p.retrieval_runs.map(r=>`<p><b>${esc(r.summary)}</b><br>第 ${esc(r.round)} 轮 · 向量：${esc(names[r.embedding_status])} · 重排：${esc(names[r.reranker_status])}<br>关键词候选 ${esc(r.lexical_candidates)} · 语义候选 ${esc(r.dense_candidates)} · 精确匹配 ${esc(r.exact_candidates)} · 重排 ${esc(r.reranked_candidates)} · ${esc(r.elapsed_seconds)} 秒</p>`).join('')}</details>`;}
 function renderModelRuns(p){if(!p.model_runs?.length)return '';return `<details class="retrieval-proof model-performance"><summary>模型调用耗时 · ${p.model_runs.length} 次</summary>${p.model_runs.map(r=>`<p><b>第 ${esc(r.round)} 轮 · ${esc(r.stage)}</b><br>${esc(r.model)} · ${esc(r.elapsed_seconds)} 秒 · ${{completed:'完成',failed:'失败',interrupted:'中断'}[r.status]||esc(r.status)}<br>请求数据 ${esc(r.payload_characters)} 字符 · 总 token：${esc(r.usage?.total_tokens??'供应商未提供')}</p>`).join('')}<p class="quiet">字符数仅指请求数据，不是 token 数；用量仅展示供应商返回值，不作估算。</p></details>`;}
-async function boot(){const d=await api("/session");if(d.version!==CLIENT_VERSION||document.documentElement.dataset.appVersion!==CLIENT_VERSION){versionMismatch=true;$('#login-button').disabled=true;throw new Error(`页面与后端版本不一致（页面 ${CLIENT_VERSION}，后端 ${d.version||'旧版'}）。请完整更新 app 和 static 后重启，再刷新网页。`);}$('#client-load-status').hidden=true;$("#setup-label").hidden=d.initialized;$("#login-title").textContent=d.initialized?"登录工作空间":"初始化工作空间";$("#login-button").textContent=d.initialized?"登录":"设置密码并进入";$("#login-form").dataset.setup=String(!d.initialized);if(d.authenticated){await Promise.all([status(),loadCases()]);const running=await api("/research");if(running.length)await openCase(running[0].case_id);else if(state.cases.length)await openCase(state.cases[0].id);}$("#login-screen").hidden=d.authenticated;$("#workspace").hidden=!d.authenticated;fitQuestion();}
+async function boot(){const d=await api("/session");if(d.version!==CLIENT_VERSION||document.documentElement.dataset.appVersion!==CLIENT_VERSION){versionMismatch=true;$('#login-button').disabled=true;throw new Error(`页面与后端版本不一致（页面 ${CLIENT_VERSION}，后端 ${d.version||'旧版'}）。请完整更新 app 和 static 后重启，再刷新网页。`);}$('#client-load-status').hidden=true;$("#setup-label").hidden=d.initialized;$("#login-title").textContent=d.initialized?"登录工作空间":"初始化工作空间";$("#login-button").textContent=d.initialized?"登录":"设置密码并进入";$("#login-form").dataset.setup=String(!d.initialized);if(d.authenticated){await Promise.all([status(),loadCases()]);const pending=pendingResearch();if(pending&&state.cases.some(item=>item.id===pending.case_id)){let recovered=null,lookupError=null;try{recovered=await pollResearch(pending.request_id);}catch(error){if(error.status!==404)lookupError=error;}await openCase(pending.case_id);restoreResearchPayload(pending.payload);if(recovered){savePendingResearch({...pending,job_id:recovered.id});if(state.jobId!==recovered.id)await monitorResearch(recovered);}else if(state.jobId){savePendingResearch({...pending,job_id:state.jobId});}else if(lookupError){state.recoveryJobId=pending.request_id;$('#resume-research').hidden=false;$('#agent-current').textContent='研究请求状态暂不可用';$('#agent-detail').textContent='原问题与请求标识已保留；可恢复查看或重新提交完全相同的问题。';}else{$('#working').hidden=false;$('#agent-current').textContent='等待恢复研究请求';$('#agent-detail').textContent='原问题与请求标识已保留；重新提交完全相同的问题会复用此请求。';}}else{const running=await api("/research");if(running.length)await openCase(running[0].case_id);else if(state.cases.length)await openCase(state.cases[0].id);}}$("#login-screen").hidden=d.authenticated;$("#workspace").hidden=!d.authenticated;fitQuestion();}
 async function loadCases(){state.cases=await api("/cases");renderCases();}
 function renderCases(){$("#case-list").innerHTML=state.cases.length?state.cases.map(c=>`<button class="case-row ${c.id===state.caseId?"active":""}" data-case="${esc(c.id)}" title="${esc(c.title)}">${esc(c.title)}</button>`).join(""):"<p class='quiet'>尚无研究案件</p>";}
 function syncCaseControls(){const disabled=state.busy||state.caseLoading;$('#send').disabled=disabled;$('#add-memory').disabled=disabled;$$('#case-actions button').forEach(button=>button.disabled=disabled);}
@@ -67,7 +90,7 @@ async function openCase(id){
   $("#messages").innerHTML=d.messages.length?d.messages.map(m=>renderMessage(m)).join(""):'<div class="welcome"><div class="empty-symbol">§</div><h2>开始本案的法律研究</h2><p>输入事实与问题。已提供的信息会随本案保留；<br>关键事实可在右侧手工确认。</p></div>';
   renderMemories(d.memories);$("#observed-facts").innerHTML=renderFacts(d.observed_facts||[]);renderCases();view("research");fitQuestion();scrollMessages();
   if(d.active_jobs?.length){$("#question").value=d.active_jobs[0].question||"";fitQuestion();monitorResearch(d.active_jobs[0]);}
-  else if(d.last_problem){renderProgress(d.last_problem);$("#cancel-research").hidden=true;$("#agent-current").textContent=d.last_problem.status==="cancelled"?"上次研究已停止":"上次研究未完成";$("#agent-detail").textContent=d.last_problem.error;}
+  else{const pending=pendingResearch();if(pending?.case_id===id)restoreResearchPayload(pending.payload);if(d.last_problem){renderProgress(d.last_problem);$("#cancel-research").hidden=true;$("#agent-current").textContent=d.last_problem.status==="cancelled"?"上次研究已停止":"上次研究未完成";$("#agent-detail").textContent=d.last_problem.error;}}
  }catch(error){if(request===state.caseRequest)throw error;}
  finally{if(request===state.caseRequest){state.caseLoading=false;$('#research-view').setAttribute('aria-busy','false');syncCaseControls();}}
 }
@@ -162,8 +185,8 @@ async function monitorResearch(initial){
    }
   }
   researchBusy(false);$('#cancel-research').hidden=true;
-  if(job.status==='completed'){if($('#question').value.trim()===(job.question||initial.question||'').trim())$('#question').value='';fitQuestion();await openCase(job.case_id);$('#working details').open=false;}
-  else{$('#messages .pending-user')?.remove();$('#agent-current').textContent=job.status==='cancelled'?'研究已停止':job.status==='interrupted'?'研究被服务重启中断':'研究未完成';$('#agent-detail').textContent=job.error||'请重新提问';}
+  if(job.status==='completed'){clearPendingResearch(job.id);if($('#question').value.trim()===(job.question||initial.question||'').trim())$('#question').value='';fitQuestion();await openCase(job.case_id);$('#working details').open=false;}
+  else{clearPendingResearch(job.id);$('#messages .pending-user')?.remove();$('#agent-current').textContent=job.status==='cancelled'?'研究已停止':job.status==='interrupted'?'研究被服务重启中断':'研究未完成';$('#agent-detail').textContent=job.error||'请重新提问';}
  }catch(error){
   $('#messages .pending-user')?.remove();$('#working').hidden=false;
   $('#agent-current').textContent=job.status==='completed'?'研究已完成，记录暂未加载':'进度读取已暂停';
@@ -175,7 +198,7 @@ async function monitorResearch(initial){
 $('#resume-research').onclick=guarded(async()=>{
  const id=state.recoveryJobId,cid=state.caseId;if(!id||state.busy||state.caseLoading)return;
  researchBusy(true);
- try{const job=await pollResearch(id);if(state.caseId===cid&&!state.caseLoading)await monitorResearch(job);}
+ try{const job=await pollResearch(id),pending=pendingResearch();if(pending?.request_id===id)savePendingResearch({...pending,job_id:job.id});if(state.caseId===cid&&!state.caseLoading)await monitorResearch(job);}
  catch(error){if(error.status===404){state.recoveryJobId=null;$('#resume-research').hidden=true;$('#agent-current').textContent='任务已不存在';$('#agent-detail').textContent='任务或案件已不存在，已解除等待。原问题已保留，请检查历史记录后重新提问。';}throw error;}
  finally{if(!state.jobId)researchBusy(false);}
 });
@@ -183,10 +206,15 @@ $('#cancel-research').onclick=guarded(async()=>{if(state.jobId)renderProgress(aw
 $('#ask-form').onsubmit=async e=>{
  e.preventDefault();if(state.busy||state.caseLoading)return;if(!state.caseId){newCase();return;}
  const text=$('#question').value.trim();if(!text)return;
+ const payload={text,mode:$('#answer-mode').value,web_query:$('#web-query').value.trim(),online_research:$('#online-research').value==='default'?null:$('#online-research').value==='on'};
+ const prior=pendingResearch();
+ if(prior&&(prior.case_id!==state.caseId||!sameResearchPayload(prior.payload,payload))){toast('上次请求仍未确认完成。请先恢复或重新提交完全相同的问题，避免重复研究。',true);return;}
+ const request_id=prior?.request_id||globalThis.crypto?.randomUUID?.()||String(Date.now())+Math.random().toString(16).slice(2);
+ savePendingResearch({case_id:state.caseId,request_id,payload,job_id:prior?.job_id||null});
  researchBusy(true);$('#working details').open=true;
- const cid=state.caseId;const request_id=globalThis.crypto?.randomUUID?.()||String(Date.now())+Math.random().toString(16).slice(2);
- try{const job=await api(`/cases/${cid}/research`,{method:'POST',body:{text,mode:$('#answer-mode').value,web_query:$('#web-query').value.trim(),online_research:$('#online-research').value==='default'?null:$('#online-research').value==='on',request_id}});await monitorResearch(job);}
- catch(err){researchBusy(false);toast(err.message,true);try{const active=await api('/research');const job=active.find(j=>j.case_id===cid);if(job&&state.caseId===cid&&!state.caseLoading)await monitorResearch(job);}catch(recoveryError){toast(err.message+'；恢复任务失败：'+recoveryError.message,true);}}
+ const cid=state.caseId;
+ try{const job=await api(`/cases/${cid}/research`,{method:'POST',body:{...payload,request_id}});savePendingResearch({case_id:cid,request_id,payload,job_id:job.id});await monitorResearch(job);}
+ catch(err){researchBusy(false);toast(err.message,true);try{const job=await pollResearch(request_id);savePendingResearch({case_id:cid,request_id,payload,job_id:job.id});if(state.caseId===cid&&!state.caseLoading)await monitorResearch(job);}catch(recoveryError){if(recoveryError.status!==404){state.recoveryJobId=request_id;$('#resume-research').hidden=false;$('#agent-current').textContent='研究状态暂不可用';$('#agent-detail').textContent='服务端可能已接受请求；原问题和请求标识已保留，可恢复查看或重新提交完全相同的问题。';}else{state.recoveryJobId=null;$('#resume-research').hidden=true;$('#agent-current').textContent='研究请求未能确认';$('#agent-detail').textContent='原问题和请求标识已保留；重新提交完全相同的问题会安全地复用此请求。';}}}
 };
 function updateSourceNote(){
  const selected=$('#online-research').value;

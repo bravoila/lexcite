@@ -8,7 +8,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from app import db, indexing, jobs, llm, retrieval_services, sources
+from app import db, indexing, ingest, jobs, llm, retrieval_services, sources
 from app.research_agent import authorities, context, retrieval, runner
 from app.research_agent.schemas import AuthorityNeed, Claim, Draft, Plan, Repair, Verdict
 from app.research_agent.verification import validate_claim
@@ -203,6 +203,107 @@ def test_model_gap_for_available_article_is_not_a_server_source_gap(client, corp
     monkeypatch.setattr(authorities.ResearchSources, "acquire", lambda *args: pytest.fail("available local article must not trigger acquisition"))
     value = runner.answer(cid, "未支付价款怎么办？", online_research=True)
     assert value["source_gaps"] == [] and calls == [Draft]
+
+
+def test_identical_retrieval_stops_before_a_second_draft(client, monkeypatch):
+    model_settings(agent_rounds=3)
+    law(client)
+    cid = case(client)
+    rows, _ = retrieval.corpus("2025-01-01", "全国")
+    row = next(row for row in rows if row["number"] == "第577条")
+    row = row | {"requested": True, "retrieval_channels": ["exact"]}
+    searches, calls = [], []
+
+    def search(*args):
+        searches.append(True)
+        return [row], []
+
+    def model(system, payload, schema, verify=False):
+        calls.append(schema)
+        if schema is Draft:
+            return Draft(insufficient=False, claims=[{
+                "text": "合成重复检索测试结论。",
+                "kind": "inference",
+                "evidence": [{"article_id": row["id"], "quote": row["body"]}],
+            }])
+        if schema is Verdict:
+            return Verdict(checks=[{"claim_index": 0, "supported": False,
+                                   "action": "retrieve", "reason": "合成重复检索用例"}])
+        if schema is Plan:
+            return Plan(queries=["重复检索测试"])
+        pytest.fail(f"unexpected model stage: {schema}")
+
+    monkeypatch.setattr(retrieval, "search", search)
+    monkeypatch.setattr(llm, "request_json", model)
+    value = runner.answer(cid, "合成重复检索测试", online_research=False)
+    assert len(searches) == 2
+    assert calls == [Draft, Verdict, Plan]
+    assert value["rounds"] == 2 and value["model_calls"] == 3
+    assert any("补充检索未取得新依据" in warning for warning in value["warnings"])
+
+
+def test_empty_evidence_in_browser_fixture_requests_authority(monkeypatch):
+    import importlib
+    import sys
+
+    from app import websearch
+
+    originals = (
+        authorities.directory_for, sources.download_official, llm.request_json,
+        websearch.search, retrieval_services.post,
+    )
+    monkeypatch.syspath_prepend(str(db.ROOT / "tests"))
+    fixture = importlib.import_module("browser_fixture_app")
+    try:
+        monkeypatch.setattr(llm, "settings", lambda: {"model": "core-browser-fixture"})
+        draft = fixture.fixture_model("", {"evidence": []}, Draft)
+        assert not draft.claims
+        assert draft.missing_authorities[0].name == authorities.CATALOG[0]["name"]
+    finally:
+        authorities.directory_for, sources.download_official, llm.request_json, websearch.search, retrieval_services.post = originals
+        sys.modules.pop("browser_fixture_app", None)
+
+
+def test_unexpected_official_parser_error_degrades_at_extract_url_boundary(client, monkeypatch):
+    def unexpected_parse_error(*args, **kwargs):
+        raise RuntimeError("synthetic parser regression")
+
+    monkeypatch.setattr(sources, "read_official", unexpected_parse_error)
+    response = client.post("/api/extract-url", json={"url": "https://www.gov.cn/fixture.html"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "官网正文解析失败，请下载原文或复制正文后导入"
+
+
+def test_unexpected_official_parser_error_preserves_local_claims(client, corpus, monkeypatch):
+    model_settings()
+    need = {"name": authorities.CATALOG[0]["name"], "articles": ["第五条"]}
+    monkeypatch.setattr(authorities, "directory_for", lambda _: [])
+    monkeypatch.setattr(sources, "download_official", lambda url: (
+        url, {"content-type": "application/pdf"}, b"%PDF fixture"
+    ))
+
+    def unexpected_parse_error(*args, **kwargs):
+        raise RuntimeError("synthetic parser regression")
+
+    monkeypatch.setattr(ingest, "extract_file", unexpected_parse_error)
+
+    def model(system, payload, schema, verify=False):
+        if schema is Draft:
+            row = payload["evidence"][0]
+            return Draft(insufficient=False, missing_authorities=[need], claims=[{
+                "text": "仅根据本地原文形成合成测试结论。",
+                "kind": "rule",
+                "evidence": [{"article_id": row["id"], "quote": row["body"]}],
+            }])
+        assert schema is Verdict
+        return Verdict(checks=[{"claim_index": 0, "supported": True, "reason": "合成回归"}])
+
+    monkeypatch.setattr(llm, "request_json", model)
+    value = runner.answer(case(client), "未支付价款怎么办？", online_research=True)
+    assert value["status"] == "partial" and len(value["claims"]) == 1
+    assert value["citations"][0]["law_id"] == corpus["law"]["id"]
+    assert any(lead["state"] == "read_failed" for lead in value["web_sources"])
+    assert not value["model_errors"]
 
 
 def test_long_requested_provision_is_explicitly_omitted_or_returned_complete(client, monkeypatch):

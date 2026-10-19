@@ -22,7 +22,10 @@ docker compose ps
 docker compose logs --tail=30 lexcite
 ```
 
-默认地址：http://localhost:8080。未设置初始密码时，服务就绪后由管理员读取码文件：
+默认地址：http://localhost:8080。Origin 白名单固定允许该地址及
+http://127.0.0.1:8080，不再依据请求 Host 自动放行。若浏览器使用其他地址或端口，
+请在`.env`中把`LEXCITE_PUBLIC_URL`设为完全匹配的 scheme/host/port；公网部署应使用 HTTPS。
+未设置初始密码时，服务就绪后由管理员读取码文件：
 
 ```bash
 docker compose exec lexcite cat data/setup-code.txt

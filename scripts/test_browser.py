@@ -22,7 +22,12 @@ def main():
         env = os.environ.copy()
         for key in ("MODEL_PROVIDER", "MODEL_BASE_URL", "MODEL_NAME", "MODEL_API_KEY"):
             env.pop(key, None)
-        env.update({"LEXCITE_DATA": temp, "LEXCITE_ADMIN_PASSWORD": secrets.token_urlsafe(24)})
+        test_url = f"http://127.0.0.1:{port}"
+        env.update({
+            "LEXCITE_DATA": temp,
+            "LEXCITE_ADMIN_PASSWORD": secrets.token_urlsafe(24),
+            "LEXCITE_PUBLIC_URL": test_url,
+        })
         with open(Path(temp)/"server.log", "w+") as log:
             process = subprocess.Popen([sys.executable, "-m", "uvicorn", "browser_fixture_app:app", "--app-dir", "tests", "--host", "127.0.0.1", "--port", str(port)], cwd=root, env=env, stdout=log, stderr=log)
             try:
@@ -35,7 +40,10 @@ def main():
                             time.sleep(.05)
                     else:
                         raise RuntimeError("Fixture server did not start")
-                env.update({"LEXCITE_TEST_URL": f"http://127.0.0.1:{port}", "LEXCITE_TEST_PASSWORD": env["LEXCITE_ADMIN_PASSWORD"]})
+                env.update({
+                    "LEXCITE_TEST_URL": test_url,
+                    "LEXCITE_TEST_PASSWORD": env["LEXCITE_ADMIN_PASSWORD"],
+                })
                 result = subprocess.run(["node", os.getenv("LEXCITE_BROWSER_SCRIPT", "tests/browser_smoke.cjs")], cwd=root, env=env, timeout=90)
                 if result.returncode:
                     log.seek(0)

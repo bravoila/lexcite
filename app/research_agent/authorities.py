@@ -6,6 +6,7 @@ sources are temporary, distinctly labelled, and retained with the answer.
 """
 import datetime as dt
 import hashlib
+import logging
 import re
 import time
 from .. import db, ingest, sources, websearch, llm
@@ -151,7 +152,13 @@ class ResearchSources:
         if self.deadline-time.monotonic()<36:
             raise SourceBudget('time_limit','本次研究剩余时间不足36秒，未再发起官网读取。可增加研究总时限后重试。')
         self.reads+=1
-        return sources.read_official(url) if require_articles else sources.read_official(url,require_articles=False)
+        try:
+            return sources.read_official(url) if require_articles else sources.read_official(url,require_articles=False)
+        except (ValueError, OSError, llm.ModelError):
+            raise
+        except Exception as exc:
+            logging.getLogger('lexcite').exception('Unexpected official-source read or parse failure')
+            raise ValueError(f'官方原文读取或解析失败（{type(exc).__name__}），未纳入本次证据') from exc
 
     def acquire(self, needs, event_date, jurisdiction, emit):
         added=[]

@@ -7,10 +7,42 @@ from concurrent.futures import ThreadPoolExecutor
 from . import db, llm, retrieval_services as services
 
 _guard=threading.Lock()
+_state_guard=threading.RLock()
 _thread=None
 _stop=threading.Event()
 _requested=threading.Event()
 _retry=False
+
+
+def _write_job(connection, job):
+    connection.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',
+                       ('embedding_job',json.dumps(job,ensure_ascii=False)))
+
+
+def _job_from(connection):
+    row=connection.execute("SELECT value FROM kv WHERE key='embedding_job'").fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _start_job(job, check):
+    with _state_guard:
+        check()
+        with db.connect() as c:
+            current=_job_from(c)
+            current.update(job)
+            _write_job(c,current)
+
+
+def _finish_job(status, updates=None):
+    """Only the first terminal transition from queued/running may win."""
+    with _state_guard:
+        with db.connect() as c:
+            current=_job_from(c)
+            if current.get('status') not in ('queued','running'):return False
+            current.update(updates or {})
+            current.update(status=status,finished=db.now())
+            _write_job(c,current)
+            return True
 
 
 def ensure_schema():
@@ -124,7 +156,7 @@ def build(*, retry_failed=True, check=lambda:None):
         states={r['article_id']:dict(r) for r in c.execute('SELECT * FROM embedding_states WHERE fingerprint=?',(fp,))}
     pending=[r for r in rows if r['id'] not in states or states[r['id']]['content_hash']!=content_hash(r) or (states[r['id']]['status']!='ready' and (retry_failed or states[r['id']]['status']!='failed'))]
     job={'status':'running','fingerprint':fp,'total':len(pending),'completed':0,'failed':0,'started':db.now()}
-    check();db.put('embedding_job',job);count=0
+    _start_job(job,check);count=0
     records={};batches=[];batch=[]
     for row in pending:
         texts=chunks(row,s['chunk_chars']);digest=content_hash(row)
@@ -136,13 +168,20 @@ def build(*, retry_failed=True, check=lambda:None):
 
     def fail_articles(article_ids,exc):
         failed_ids=set(article_ids)
-        with db.connect() as c:
-            for aid in failed_ids:
-                rec=records[aid]
-                if c.execute('SELECT 1 FROM articles WHERE id=?',(aid,)).fetchone():
-                    c.execute('INSERT OR REPLACE INTO embedding_states VALUES(?,?,?,?,?,?)',
-                        (aid,fp,rec['digest'],'failed',str(exc),db.now()))
-        job.update(status='failed',failed=len(failed_ids),error=str(exc),finished=db.now());db.put('embedding_job',job)
+        with _state_guard:
+            check()
+            with db.connect() as c:
+                current=_job_from(c)
+                if current.get('status') not in ('queued','running'):
+                    raise InterruptedError('索引状态已结束')
+                for aid in failed_ids:
+                    rec=records[aid]
+                    if c.execute('SELECT 1 FROM articles WHERE id=?',(aid,)).fetchone():
+                        c.execute('INSERT OR REPLACE INTO embedding_states VALUES(?,?,?,?,?,?)',
+                            (aid,fp,rec['digest'],'failed',str(exc),db.now()))
+                current.update(status='failed',failed=len(failed_ids),error=str(exc),finished=db.now())
+                _write_job(c,current)
+        job.update(status='failed',failed=len(failed_ids),error=str(exc),finished=db.now())
         return {'count':count,'failed':len(failed_ids),'pending':len(pending)-count-len(failed_ids)}
 
     def publish(aid):
@@ -151,20 +190,28 @@ def build(*, retry_failed=True, check=lambda:None):
         vectors=services.validate_vectors(rec['vectors'],len(texts))
         check()
         if fp!=services.fingerprint():raise InterruptedError('索引配置已变化')
-        with db.connect() as c:
-            # Metadata or body edits during a request cannot publish a stale index.
-            found=c.execute("""SELECT a.*,l.name,l.canonical_name,l.version,l.kind,l.valid_from,l.valid_to,
-              COALESCE(h.heading_path,'') AS heading_path FROM articles a JOIN laws l ON a.law_id=l.id
-              LEFT JOIN article_headings h ON h.article_id=a.id WHERE a.id=?""",(row['id'],)).fetchone()
-            current=dict(found) if found else None
-            if not current or content_hash(current)!=digest:return
-            dim=db.get('embedding_dimension:'+fp)
-            if dim and dim!=len(vectors[0]):raise llm.ModelError('服务返回的维度与本索引不一致，请检查模型版本并重建')
-            c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',('embedding_dimension:'+fp,json.dumps(len(vectors[0]))))
-            c.execute('DELETE FROM embedding_chunks WHERE article_id=? AND fingerprint=?',(row['id'],fp))
-            c.executemany('INSERT INTO embedding_chunks VALUES(?,?,?,?,?,?)',[(row['id'],fp,i,digest,t,json.dumps(v)) for i,(t,v) in enumerate(zip(texts,vectors))])
-            c.execute('INSERT OR REPLACE INTO embedding_states VALUES(?,?,?,?,?,?)',(row['id'],fp,digest,'ready','',db.now()))
-        count+=1;job['completed']=count;db.put('embedding_job',job)
+        with _state_guard:
+            check()
+            with db.connect() as c:
+                active_job=_job_from(c)
+                if active_job.get('status')!='running':
+                    raise InterruptedError('索引状态已结束')
+                # Metadata or body edits during a request cannot publish a stale index.
+                found=c.execute("""SELECT a.*,l.name,l.canonical_name,l.version,l.kind,l.valid_from,l.valid_to,
+                  COALESCE(h.heading_path,'') AS heading_path FROM articles a JOIN laws l ON a.law_id=l.id
+                  LEFT JOIN article_headings h ON h.article_id=a.id WHERE a.id=?""",(row['id'],)).fetchone()
+                current=dict(found) if found else None
+                if not current or content_hash(current)!=digest:return
+                dimrow=c.execute('SELECT value FROM kv WHERE key=?',('embedding_dimension:'+fp,)).fetchone()
+                dim=json.loads(dimrow[0]) if dimrow else None
+                if dim and dim!=len(vectors[0]):raise llm.ModelError('服务返回的维度与本索引不一致，请检查模型版本并重建')
+                c.execute('INSERT OR REPLACE INTO kv VALUES(?,?)',('embedding_dimension:'+fp,json.dumps(len(vectors[0]))))
+                c.execute('DELETE FROM embedding_chunks WHERE article_id=? AND fingerprint=?',(row['id'],fp))
+                c.executemany('INSERT INTO embedding_chunks VALUES(?,?,?,?,?,?)',[(row['id'],fp,i,digest,t,json.dumps(v)) for i,(t,v) in enumerate(zip(texts,vectors))])
+                c.execute('INSERT OR REPLACE INTO embedding_states VALUES(?,?,?,?,?,?)',(row['id'],fp,digest,'ready','',db.now()))
+                count+=1;job['completed']=count
+                active_job.update(job)
+                _write_job(c,active_job)
 
     # Qwen text-embedding-v4 accepts up to 10 inputs; batches of 8 also fit
     # other compatible services. Four requests run at once to reduce latency
@@ -189,7 +236,8 @@ def build(*, retry_failed=True, check=lambda:None):
                 except llm.ModelError as exc:
                     check()
                     return fail_articles([item[0] for item in items],exc)
-    job.update(status='completed',finished=db.now());db.put('embedding_job',job)
+    if not _finish_job('completed',job):
+        raise InterruptedError('索引状态已结束')
     db.audit('embedding_index',{'count':count,'fingerprint':fp})
     return {'count':count,'failed':0,'pending':0}
 
@@ -209,16 +257,12 @@ def _worker():
                 check();build(retry_failed=retry,check=check)
             finally:MODEL_LOCK.release()
     except InterruptedError:
-        job=db.get('embedding_job',{});job.update(status='interrupted',finished=db.now());db.put('embedding_job',job)
+        _finish_job('interrupted')
     except Exception:
-        job=db.get('embedding_job',{});job.update(status='failed',error='索引任务未完成，请检查服务日志后重试',finished=db.now());db.put('embedding_job',job)
+        _finish_job('failed',{'error':'索引任务未完成，请检查服务日志后重试'})
     finally:
         with _guard:
-            if _stop.is_set():
-                job=db.get('embedding_job',{})
-                if job.get('status') in ('queued','running'):
-                    job.update(status='interrupted',finished=db.now())
-                    db.put('embedding_job',job)
+            if _stop.is_set():_finish_job('interrupted')
             _thread=None
             reschedule=_requested.is_set() and not _stop.is_set()
             retry=_retry
@@ -245,18 +289,22 @@ def start(*, manual=False):
         _requested.set();_retry=_retry or manual
         if _thread and _thread.is_alive():return
         _stop.clear()
-        db.put('embedding_job',{'status':'queued','fingerprint':services.fingerprint(s),'started':db.now()})
+        with _state_guard:
+            db.put('embedding_job',{'status':'queued','fingerprint':services.fingerprint(s),'started':db.now()})
         _thread=threading.Thread(target=_worker,name='lexcite-index',daemon=True);_thread.start()
 
 
 def cancel():
     global _retry
     with _guard:
-        _stop.set();_requested.clear();_retry=False
-        job=db.get('embedding_job',{})
-        if job.get('status') in ('queued','running'):
-            job.update(status='interrupted',finished=db.now())
-            db.put('embedding_job',job)
+        _requested.clear();_retry=False
+        with _state_guard:
+            _stop.set()
+            with db.connect() as c:
+                job=_job_from(c)
+                if job.get('status') in ('queued','running'):
+                    job.update(status='interrupted',finished=db.now())
+                    _write_job(c,job)
 
 
 def stop():
@@ -267,7 +315,5 @@ def stop():
 
 def init():
     ensure_schema()
-    job=db.get('embedding_job',{})
-    if job.get('status') in ('running','queued'):
-        job.update(status='interrupted');db.put('embedding_job',job)
+    _finish_job('interrupted')
     start()

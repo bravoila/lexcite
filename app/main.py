@@ -68,10 +68,10 @@ async def protection(request: Request, call_next):
         if request.headers.get("X-Lexcite") != "1":
             return reject("缺少请求校验标记", 403)
         public_url = os.getenv("LEXCITE_PUBLIC_URL", "").rstrip("/")
-        # With LEXCITE_PUBLIC_URL set it is the fixed whitelist source and the
-        # Host header cannot widen it; without it, single-host local deployments
-        # fall back to the request origin. SameSite=Strict remains the main line.
-        allowed = {public_url} if public_url else {str(request.base_url).rstrip("/")}
+        # Never derive the trusted origin from the request Host header. Public or
+        # non-default deployments must configure LEXCITE_PUBLIC_URL; the fixed
+        # fallback matches the documented loopback :8080 deployment.
+        allowed = {public_url} if public_url else {"http://127.0.0.1:8080", "http://localhost:8080"}
         origin = request.headers.get("origin")
         if origin and origin.rstrip("/") not in allowed:
             return reject("请求来源不匹配", 403)
@@ -472,13 +472,15 @@ def review(lid: str, value: ReviewInput):
     if value.valid_to and value.valid_to <= value.valid_from:
         raise HTTPException(400, "失效日应晚于生效日")
     with db.connect() as c:
-        c.execute("UPDATE laws SET reviewed_at=?,valid_from=?,valid_to=? WHERE id=?", (db.now(), value.valid_from.isoformat(), value.valid_to.isoformat() if value.valid_to else None, lid))
+        updated = c.execute("UPDATE laws SET reviewed_at=?,valid_from=?,valid_to=? WHERE id=?", (db.now(), value.valid_from.isoformat(), value.valid_to.isoformat() if value.valid_to else None, lid))
+        if updated.rowcount != 1:
+            raise HTTPException(404, "法规不存在")
         if value.canonical_name is not None:
             c.execute("UPDATE laws SET canonical_name=? WHERE id=?", (value.canonical_name.strip(), lid))
         if value.document_number is not None:
             c.execute("UPDATE laws SET document_number=? WHERE id=?", (value.document_number.strip(), lid))
+        c.execute("INSERT INTO audit VALUES (?,?,?,?)", (db.uid(), "law_review", json.dumps({"law_id": lid, "valid_from": str(value.valid_from), "valid_to": str(value.valid_to)}), db.now()))
     indexing.start()
-    db.audit("law_review", {"law_id": lid, "valid_from": str(value.valid_from), "valid_to": str(value.valid_to)})
     return {"ok": True}
 
 

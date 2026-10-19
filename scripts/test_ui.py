@@ -22,11 +22,13 @@ def main():
             "MODEL_LOCAL_PROVIDER", "MODEL_LOCAL_BASE_URL", "MODEL_LOCAL_NAME", "MODEL_LOCAL_API_KEY",
         ):
             env.pop(k, None)
+        test_url = f"http://127.0.0.1:{port}"
         env.update({
             "LEXCITE_DATA": temp,
             "LEXCITE_ADMIN_PASSWORD": secrets.token_urlsafe(24),
             "MODEL_PROFILE": "local",
             "MODEL_LOCAL_PROVIDER": "none",
+            "LEXCITE_PUBLIC_URL": test_url,
         })
         with open(Path(temp)/"server.log", "w+") as log:
             process = subprocess.Popen([sys.executable,"-m","uvicorn","app.main:app","--host","127.0.0.1","--port",str(port)],cwd=root,env=env,stdout=log,stderr=log)
@@ -40,7 +42,10 @@ def main():
                             time.sleep(.05)
                     else:
                         raise RuntimeError("Test server failed to start")
-                env.update({"LEXCITE_TEST_URL":f"http://127.0.0.1:{port}", "LEXCITE_TEST_PASSWORD":env["LEXCITE_ADMIN_PASSWORD"]})
+                env.update({
+                    "LEXCITE_TEST_URL": test_url,
+                    "LEXCITE_TEST_PASSWORD": env["LEXCITE_ADMIN_PASSWORD"],
+                })
                 result = subprocess.run(["node","tests/ui_smoke.cjs"],cwd=root,env=env,timeout=60)
                 if result.returncode:
                     log.seek(0)

@@ -33,6 +33,13 @@ def get(job_id):
     with db.connect() as c:
         row = c.execute("SELECT * FROM research_jobs WHERE id=?", (job_id,)).fetchone()
         if not row:
+            matches = c.execute(
+                "SELECT id FROM research_jobs WHERE request_id=? ORDER BY rowid DESC LIMIT 2",
+                (job_id,),
+            ).fetchall()
+            if len(matches) == 1:
+                row = c.execute("SELECT * FROM research_jobs WHERE id=?", (matches[0]["id"],)).fetchone()
+        if not row:
             raise HTTPException(404, "研究任务不存在")
         value = dict(row)
         if value["message_id"]:

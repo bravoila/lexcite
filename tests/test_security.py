@@ -223,6 +223,21 @@ def test_origin_mismatch_rejected_when_public_url_set(client, monkeypatch):
     assert r.status_code == 200
 
 
+def test_origin_cannot_be_authorized_by_spoofed_host(client, monkeypatch):
+    monkeypatch.delenv("LEXCITE_PUBLIC_URL", raising=False)
+    r = client.post("/api/cases", json=_case_body(), headers={
+        "Host": "evil.example.com",
+        "Origin": "http://evil.example.com",
+    })
+    assert r.status_code == 403 and "请求来源不匹配" in r.text
+
+
 def test_origin_ok_without_public_url(client):
-    r = client.post("/api/cases", json=_case_body(), headers={"Origin": "http://testserver"})
+    r = client.post("/api/cases", json=_case_body(), headers={"Origin": "http://127.0.0.1:8080"})
     assert r.status_code == 200
+
+
+def test_hash_check_requires_authentication(client, corpus):
+    unauthenticated = TestClient(app, headers={"X-Lexcite": "1"})
+    response = unauthenticated.get(f"/api/laws/{corpus['law']['id']}/hash-check")
+    assert response.status_code == 401
